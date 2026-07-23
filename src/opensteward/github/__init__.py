@@ -38,6 +38,17 @@ from opensteward.github.historical_knowledge import (
     GitHubHistoricalKnowledgeCollector,
     knowledge_repository_from_github,
 )
+from opensteward.github.historical_paths import (
+    GITHUB_HISTORICAL_PATH_PAGE_SIZE,
+    MAX_GITHUB_HISTORICAL_FILES_PER_PULL_REQUEST,
+    MAX_GITHUB_HISTORICAL_PATH_PAGES,
+    MAX_GITHUB_HISTORICAL_PULL_REQUESTS_TO_ENRICH,
+    GitHubHistoricalPathEnrichmentError,
+    GitHubHistoricalPathEnrichmentOptions,
+    GitHubHistoricalPathEnrichmentResult,
+    GitHubHistoricalPullRequestPathEnricher,
+    GitHubHistoricalPullRequestPathEvidence,
+)
 from opensteward.github.installation_tokens import (
     INSTALLATION_TOKEN_REFRESH_MARGIN,
     GitHubInstallationToken,
@@ -102,8 +113,12 @@ from opensteward.github.settings import (
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
     "GITHUB_HISTORICAL_PAGE_SIZE",
+    "GITHUB_HISTORICAL_PATH_PAGE_SIZE",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
+    "MAX_GITHUB_HISTORICAL_FILES_PER_PULL_REQUEST",
     "MAX_GITHUB_HISTORICAL_ITEMS_PER_TYPE",
+    "MAX_GITHUB_HISTORICAL_PATH_PAGES",
+    "MAX_GITHUB_HISTORICAL_PULL_REQUESTS_TO_ENRICH",
     "MAX_GITHUB_HISTORICAL_SCAN_PAGES",
     "GitHubAccountType",
     "GitHubAppJwt",
@@ -113,6 +128,11 @@ __all__ = [
     "GitHubHistoricalKnowledgeCollectionResult",
     "GitHubHistoricalKnowledgeCollectionStats",
     "GitHubHistoricalKnowledgeCollector",
+    "GitHubHistoricalPathEnrichmentError",
+    "GitHubHistoricalPathEnrichmentOptions",
+    "GitHubHistoricalPathEnrichmentResult",
+    "GitHubHistoricalPullRequestPathEnricher",
+    "GitHubHistoricalPullRequestPathEvidence",
     "GitHubInstallationRef",
     "GitHubInstallationToken",
     "GitHubInstallationTokenError",
