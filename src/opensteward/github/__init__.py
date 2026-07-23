@@ -1,20 +1,42 @@
 """GitHub App integration for OpenSteward."""
 
-from opensteward.github.models import (
-    GitHubAccountType,
-    GitHubInstallationRef,
-    GitHubRepositoryRef,
-)
-from opensteward.github.settings import (
-    GitHubAppSettings,
-    GitHubConfigurationError,
-    get_github_settings,
-)
 from opensteward.github.app_jwt import (
     GITHUB_APP_JWT_ALGORITHM,
     GitHubAppJwt,
     GitHubJwtGenerationError,
     generate_github_app_jwt,
+)
+from opensteward.github.assessments import (
+    GitHubPullRequestAssessmentError,
+    GitHubPullRequestAssessmentPolicy,
+    GitHubPullRequestAssessmentRequest,
+    GitHubPullRequestAssessmentResult,
+    GitHubPullRequestAssessmentRunner,
+    GitHubPullRequestAssessmentService,
+    GitHubPullRequestAssessmentSummary,
+)
+from opensteward.github.contribution_inputs import (
+    DEFAULT_TEST_FILE_PATTERNS,
+    GitHubApprovalCountSource,
+    GitHubCategoryEvidenceSource,
+    GitHubContributionCategoryEvidence,
+    GitHubContributionCategoryPathRule,
+    GitHubContributionConversionError,
+    GitHubContributionInputOptions,
+    GitHubContributionInputResult,
+    GitHubIssueLinkageScope,
+    GitHubIssueReferenceEvidence,
+    build_contribution_policy_input_from_snapshot,
+)
+from opensteward.github.historical_knowledge import (
+    GITHUB_HISTORICAL_PAGE_SIZE,
+    MAX_GITHUB_HISTORICAL_ITEMS_PER_TYPE,
+    MAX_GITHUB_HISTORICAL_SCAN_PAGES,
+    GitHubHistoricalKnowledgeCollectionOptions,
+    GitHubHistoricalKnowledgeCollectionResult,
+    GitHubHistoricalKnowledgeCollectionStats,
+    GitHubHistoricalKnowledgeCollector,
+    knowledge_repository_from_github,
 )
 from opensteward.github.installation_tokens import (
     INSTALLATION_TOKEN_REFRESH_MARGIN,
@@ -26,24 +48,10 @@ from opensteward.github.installation_tokens import (
     GitHubRepositorySelection,
     GitHubTokenRepository,
 )
-from opensteward.github.rest_client import (
-    DEFAULT_GITHUB_ACCEPT,
-    GitHubPaginationLinks,
-    GitHubRateLimitMetadata,
-    GitHubRestClient,
-    GitHubRestError,
-    GitHubRestResponse,
-    GitHubRestResponseError,
-    GitHubRestTransportError,
-)
-from opensteward.github.repositories import (
-    MAX_REPOSITORY_POLICY_BYTES,
-    GitHubRepositoryMetadata,
-    GitHubRepositoryOwner,
-    GitHubRepositoryPolicyFile,
-    GitHubRepositoryPolicyFileError,
-    GitHubRepositoryPolicyResult,
-    GitHubRepositoryService,
+from opensteward.github.models import (
+    GitHubAccountType,
+    GitHubInstallationRef,
+    GitHubRepositoryRef,
 )
 from opensteward.github.pull_requests import (
     GITHUB_PAGE_SIZE,
@@ -63,38 +71,48 @@ from opensteward.github.pull_requests import (
     GitHubPullRequestSnapshot,
     GitHubPullRequestSnapshotError,
 )
-from opensteward.github.contribution_inputs import (
-    DEFAULT_TEST_FILE_PATTERNS,
-    GitHubApprovalCountSource,
-    GitHubCategoryEvidenceSource,
-    GitHubContributionCategoryEvidence,
-    GitHubContributionCategoryPathRule,
-    GitHubContributionConversionError,
-    GitHubContributionInputOptions,
-    GitHubContributionInputResult,
-    GitHubIssueLinkageScope,
-    GitHubIssueReferenceEvidence,
-    build_contribution_policy_input_from_snapshot,
+from opensteward.github.repositories import (
+    MAX_REPOSITORY_POLICY_BYTES,
+    GitHubRepositoryMetadata,
+    GitHubRepositoryOwner,
+    GitHubRepositoryPolicyFile,
+    GitHubRepositoryPolicyFileError,
+    GitHubRepositoryPolicyResult,
+    GitHubRepositoryService,
 )
-from opensteward.github.assessments import (
-    GitHubPullRequestAssessmentError,
-    GitHubPullRequestAssessmentPolicy,
-    GitHubPullRequestAssessmentRequest,
-    GitHubPullRequestAssessmentResult,
-    GitHubPullRequestAssessmentRunner,
-    GitHubPullRequestAssessmentService,
-    GitHubPullRequestAssessmentSummary,
+from opensteward.github.rest_client import (
+    DEFAULT_GITHUB_ACCEPT,
+    GitHubPaginationLinks,
+    GitHubRateLimitMetadata,
+    GitHubRestClient,
+    GitHubRestError,
+    GitHubRestResponse,
+    GitHubRestResponseError,
+    GitHubRestTransportError,
 )
 from opensteward.github.runtime import (
     LiveGitHubPullRequestAssessmentRunner,
 )
+from opensteward.github.settings import (
+    GitHubAppSettings,
+    GitHubConfigurationError,
+    get_github_settings,
+)
+
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
+    "GITHUB_HISTORICAL_PAGE_SIZE",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
+    "MAX_GITHUB_HISTORICAL_ITEMS_PER_TYPE",
+    "MAX_GITHUB_HISTORICAL_SCAN_PAGES",
     "GitHubAccountType",
     "GitHubAppJwt",
     "GitHubAppSettings",
     "GitHubConfigurationError",
+    "GitHubHistoricalKnowledgeCollectionOptions",
+    "GitHubHistoricalKnowledgeCollectionResult",
+    "GitHubHistoricalKnowledgeCollectionStats",
+    "GitHubHistoricalKnowledgeCollector",
     "GitHubInstallationRef",
     "GitHubInstallationToken",
     "GitHubInstallationTokenError",
@@ -107,6 +125,7 @@ __all__ = [
     "GitHubTokenRepository",
     "generate_github_app_jwt",
     "get_github_settings",
+    "knowledge_repository_from_github",
     "DEFAULT_GITHUB_ACCEPT",
     "GitHubPaginationLinks",
     "GitHubRateLimitMetadata",
