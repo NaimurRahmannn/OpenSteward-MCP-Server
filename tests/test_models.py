@@ -24,8 +24,6 @@ def create_valid_factors() -> ReviewCostFactors:
         ci_risk=20,
         reviewer_load=50,
     )
-
-
 def test_review_cost_factors_accept_valid_values() -> None:
     factors = create_valid_factors()
 
