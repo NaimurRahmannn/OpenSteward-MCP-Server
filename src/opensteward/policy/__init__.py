@@ -23,6 +23,16 @@ from opensteward.policy.loader import (
     parse_repository_policy,
     parse_repository_policy_with_metadata,
 )
+from opensteward.policy.evaluator import (
+    evaluate_contribution_policy,
+)
+from opensteward.policy.results import (
+    FindingSeverity,
+    PolicyEvaluationResult,
+    PolicyFinding,
+    PolicyFindingStatus,
+    PolicyRule,
+)
 from opensteward.policy.models import (
     AutomationPolicy,
     ContributionCategory,
@@ -64,4 +74,10 @@ __all__ = [
     "normalize_repository_path",
     "normalize_repository_pattern",
     "ContributionPolicyInput",
+    "FindingSeverity",
+    "PolicyEvaluationResult",
+    "PolicyFinding",
+    "PolicyFindingStatus",
+    "PolicyRule",
+    "evaluate_contribution_policy",
 ]

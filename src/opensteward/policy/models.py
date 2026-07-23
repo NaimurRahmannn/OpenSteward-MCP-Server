@@ -59,6 +59,7 @@ class PullRequestPolicy(StrictPolicyModel):
             ContributionCategory.BUG_FIX,
             ContributionCategory.OBSERVABLE_BEHAVIOR,
             ContributionCategory.PUBLIC_API,
+            ContributionCategory.SECURITY,
         ],
     )
 

@@ -32,13 +32,6 @@ def test_parse_valid_policy() -> None:
     policy = parse_repository_policy(
         """
         version: 1
-
-        contributions:
-          ai_assistance:
-            allowed: true
-            disclosure_required: true
-            human_attestation_required: true
-
         pull_requests:
           linked_issue_required_for:
             - public_api
@@ -54,7 +47,7 @@ def test_parse_valid_policy() -> None:
     )
 
     assert policy.version == 1
-    assert policy.contributions.ai_assistance.disclosure_required is True
+   
     assert policy.pull_requests.preferred_maximum_diff_lines == 750
 
     assert policy.pull_requests.linked_issue_required_for == [

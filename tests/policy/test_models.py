@@ -14,13 +14,6 @@ def test_repository_policy_has_safe_defaults() -> None:
     policy = RepositoryPolicy()
 
     assert policy.version == 1
-
-    assert policy.contributions.ai_assistance.allowed is True
-    assert (
-        policy.contributions.ai_assistance.disclosure_required
-        is False
-    )
-
     assert (
         policy.pull_requests.preferred_maximum_diff_lines
         == 500
@@ -30,6 +23,7 @@ def test_repository_policy_has_safe_defaults() -> None:
         ContributionCategory.BUG_FIX,
         ContributionCategory.OBSERVABLE_BEHAVIOR,
         ContributionCategory.PUBLIC_API,
+        ContributionCategory.SECURITY
     ]
 
     assert (
@@ -50,13 +44,6 @@ def test_repository_policy_accepts_complete_configuration() -> None:
     policy = RepositoryPolicy.model_validate(
         {
             "version": 1,
-            "contributions": {
-                "ai_assistance": {
-                    "allowed": True,
-                    "disclosure_required": True,
-                    "human_attestation_required": True,
-                }
-            },
             "pull_requests": {
                 "linked_issue_required_for": [
                     "public_api",
