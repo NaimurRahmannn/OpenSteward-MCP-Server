@@ -7,6 +7,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    computed_field,
     field_validator,
     model_validator,
 )
@@ -29,6 +30,12 @@ class RiskLevel(StrEnum):
     HIGH = "high"
     CRITICAL = "critical"
 
+class PolicySource(StrEnum):
+    """Origin of the active repository policy."""
+
+    DEFAULT = "default"
+    REPOSITORY_FILE = "repository_file"
+    MEMORY = "memory"
 
 class ContributionCategory(StrEnum):
     """Contribution categories understood by the policy engine."""
@@ -206,3 +213,16 @@ class RepositoryPolicy(StrictPolicyModel):
             )
 
         return rules
+class LoadedRepositoryPolicy(StrictPolicyModel):
+    """A validated policy together with its origin metadata."""
+
+    policy: RepositoryPolicy
+    source: PolicySource
+    source_reference: str = Field(min_length=1)
+
+    @computed_field
+    @property
+    def used_defaults(self) -> bool:
+        """Return whether OpenSteward's built-in defaults were used."""
+
+        return self.source == PolicySource.DEFAULT
