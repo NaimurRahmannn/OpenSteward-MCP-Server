@@ -63,6 +63,19 @@ from opensteward.github.pull_requests import (
     GitHubPullRequestSnapshot,
     GitHubPullRequestSnapshotError,
 )
+from opensteward.github.contribution_inputs import (
+    DEFAULT_TEST_FILE_PATTERNS,
+    GitHubApprovalCountSource,
+    GitHubCategoryEvidenceSource,
+    GitHubContributionCategoryEvidence,
+    GitHubContributionCategoryPathRule,
+    GitHubContributionConversionError,
+    GitHubContributionInputOptions,
+    GitHubContributionInputResult,
+    GitHubIssueLinkageScope,
+    GitHubIssueReferenceEvidence,
+    build_contribution_policy_input_from_snapshot,
+)
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
@@ -113,4 +126,15 @@ __all__ = [
     "GitHubPullRequestService",
     "GitHubPullRequestSnapshot",
     "GitHubPullRequestSnapshotError",
+    "DEFAULT_TEST_FILE_PATTERNS",
+    "GitHubApprovalCountSource",
+    "GitHubCategoryEvidenceSource",
+    "GitHubContributionCategoryEvidence",
+    "GitHubContributionCategoryPathRule",
+    "GitHubContributionConversionError",
+    "GitHubContributionInputOptions",
+    "GitHubContributionInputResult",
+    "GitHubIssueLinkageScope",
+    "GitHubIssueReferenceEvidence",
+    "build_contribution_policy_input_from_snapshot",
 ]
