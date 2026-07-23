@@ -36,6 +36,15 @@ from opensteward.github.rest_client import (
     GitHubRestResponseError,
     GitHubRestTransportError,
 )
+from opensteward.github.repositories import (
+    MAX_REPOSITORY_POLICY_BYTES,
+    GitHubRepositoryMetadata,
+    GitHubRepositoryOwner,
+    GitHubRepositoryPolicyFile,
+    GitHubRepositoryPolicyFileError,
+    GitHubRepositoryPolicyResult,
+    GitHubRepositoryService,
+)
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
@@ -63,4 +72,11 @@ __all__ = [
     "GitHubRestResponse",
     "GitHubRestResponseError",
     "GitHubRestTransportError",
+    "MAX_REPOSITORY_POLICY_BYTES",
+    "GitHubRepositoryMetadata",
+    "GitHubRepositoryOwner",
+    "GitHubRepositoryPolicyFile",
+    "GitHubRepositoryPolicyFileError",
+    "GitHubRepositoryPolicyResult",
+    "GitHubRepositoryService",
 ]

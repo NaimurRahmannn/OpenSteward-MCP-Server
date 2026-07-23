@@ -129,3 +129,26 @@ def test_existing_load_function_remains_compatible(
 
     assert isinstance(policy, RepositoryPolicy)
     assert policy.version == 1
+def test_memory_parser_accepts_explicit_policy_source() -> None:
+    loaded = parse_repository_policy_with_metadata(
+        """
+        version: 1
+
+        pull_requests:
+          preferred_maximum_diff_lines: 900
+        """,
+        source="github:acme/framework@main:.opensteward.yml",
+        policy_source=PolicySource.GITHUB_REPOSITORY,
+    )
+
+    assert (
+        loaded.source
+        == PolicySource.GITHUB_REPOSITORY
+    )
+
+    assert (
+        loaded.source_reference
+        == "github:acme/framework@main:.opensteward.yml"
+    )
+
+    assert loaded.used_defaults is False
