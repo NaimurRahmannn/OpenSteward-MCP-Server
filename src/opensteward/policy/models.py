@@ -115,15 +115,45 @@ class ProtectedPathRule(StrictPolicyModel):
     @field_validator("pattern")
     @classmethod
     def validate_pattern(cls, pattern: str) -> str:
-        """Require repository-relative path patterns."""
+        """Normalize and validate a repository-relative glob pattern."""
 
-        if pattern.startswith("/"):
+        normalized = pattern.replace("\\", "/").strip()
+
+        while normalized.startswith("./"):
+            normalized = normalized[2:]
+
+        if not normalized:
+            raise ValueError(
+                "Protected path patterns must not be empty."
+            )
+
+        if normalized.startswith("/"):
             raise ValueError(
                 "Protected path patterns must be repository-relative."
             )
 
-        return pattern
+        parts = normalized.split("/")
 
+        if any(part == "" for part in parts):
+            raise ValueError(
+                "Protected path patterns must not contain empty segments."
+            )
+
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError(
+                "Protected path patterns must not contain '.' or '..' segments."
+            )
+
+        return normalized
+    
+class ProtectedPathMatch(StrictPolicyModel):
+    """Evidence that a repository path matched a protected-path rule."""
+
+    path: str = Field(min_length=1)
+    pattern: str = Field(min_length=1)
+    risk: RiskLevel
+    human_review_required: bool
+    explanation: str = Field(min_length=1)
 
 class RequiredApprovalsPolicy(StrictPolicyModel):
     """Minimum human approvals required for sensitive changes."""

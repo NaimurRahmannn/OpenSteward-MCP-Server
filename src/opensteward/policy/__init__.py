@@ -4,6 +4,13 @@ from opensteward.policy.defaults import (
     DEFAULT_POLICY_REFERENCE,
     create_default_repository_policy,
 )
+from opensteward.policy.path_matcher import (
+    find_protected_path_matches,
+    match_protected_paths,
+    matches_repository_pattern,
+    normalize_repository_path,
+    normalize_repository_pattern,
+)
 from opensteward.policy.loader import (
     DEFAULT_POLICY_FILENAME,
     PolicyLoadError,
@@ -20,6 +27,7 @@ from opensteward.policy.models import (
     ContributionsPolicy,
     LoadedRepositoryPolicy,
     PolicySource,
+    ProtectedPathMatch,
     ProtectedPathRule,
     PullRequestPolicy,
     RepositoryPolicy,
@@ -50,4 +58,10 @@ __all__ = [
     "load_repository_policy_with_metadata",
     "parse_repository_policy",
     "parse_repository_policy_with_metadata",
+    "ProtectedPathMatch",
+    "find_protected_path_matches",
+    "match_protected_paths",
+    "matches_repository_pattern",
+    "normalize_repository_path",
+    "normalize_repository_pattern",
 ]

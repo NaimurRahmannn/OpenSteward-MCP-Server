@@ -232,3 +232,41 @@ def test_sensitive_approvals_cannot_be_lower_than_default() -> None:
                 }
             }
         )
+def test_protected_path_pattern_is_normalized() -> None:
+    policy = RepositoryPolicy.model_validate(
+        {
+            "protected_paths": [
+                {
+                    "pattern": ".\\src\\security\\**",
+                    "risk": "critical",
+                }
+            ]
+        }
+    )
+
+    assert policy.protected_paths[0].pattern == "src/security/**"
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "../security/**",
+        "src/../security/**",
+        "src//security/**",
+        "./../security/**",
+    ],
+)
+def test_policy_rejects_unsafe_protected_path_patterns(
+    pattern: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        RepositoryPolicy.model_validate(
+            {
+                "protected_paths": [
+                    {
+                        "pattern": pattern,
+                        "risk": "critical",
+                    }
+                ]
+            }
+        )
