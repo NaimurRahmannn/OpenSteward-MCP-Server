@@ -4,7 +4,10 @@ from opensteward import __version__
 from opensteward.models import ReviewCostFactors,ReviewCostResult
 from opensteward.review_cost import calculate_review_cost
 from opensteward.settings import get_settings
-
+from opensteward.mcp.policy_capabilities import (
+    evaluate_repository_policy,
+    repository_policy_resource,
+)
 mcp=FastMCP(
     name="OpenSteward",
     stateless_http=True,
@@ -40,3 +43,7 @@ def estimate_review_cost(
     """
 
     return calculate_review_cost(factors)
+mcp.tool()(evaluate_repository_policy)
+mcp.resource(
+    "steward://repository/policy"
+)(repository_policy_resource)
