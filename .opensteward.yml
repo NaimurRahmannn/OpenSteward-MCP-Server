@@ -1,0 +1,42 @@
+version: 1
+
+contributions:
+  ai_assistance:
+    allowed: true
+    disclosure_required: true
+    human_attestation_required: true
+
+pull_requests:
+  linked_issue_required_for:
+    - public_api
+    - architecture
+
+  tests_required_for:
+    - bug_fix
+    - observable_behavior
+    - public_api
+
+  preferred_maximum_diff_lines: 500
+
+protected_paths:
+  - pattern: "src/security/**"
+    risk: critical
+    human_review_required: true
+
+  - pattern: "src/parser/**"
+    risk: high
+    human_review_required: true
+
+review:
+  maximum_pending_reviews_per_reviewer: 8
+
+  required_approvals:
+    default: 1
+    public_api: 2
+    security: 2
+
+automation:
+  publish_check_runs: false
+  publish_comments: false
+  apply_labels: false
+  require_human_approval: true
