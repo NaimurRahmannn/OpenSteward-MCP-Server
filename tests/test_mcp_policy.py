@@ -113,7 +113,32 @@ async def test_evaluate_repository_policy_tool(
     assert result.structuredContent is not None
 
     data = result.structuredContent
+    packet = data["packet"]
+    assert packet["recommendation"] == "request_changes"
+    assert packet["ready_for_detailed_review"] is False
 
+    assert len(packet["blocking_requirements"]) == 3
+    assert len(packet["warnings"]) == 2
+
+    assert {
+        item["rule"]
+        for item in packet["blocking_requirements"]
+    } == {
+        "required_tests",
+        "linked_issue",
+        "required_approvals",
+    }
+
+    assert {
+        item["rule"]
+        for item in packet["warnings"]
+    } == {
+        "preferred_diff_size",
+        "protected_path",
+    }
+
+    assert len(packet["suggested_next_actions"]) >= 3
+    assert "2 remaining" in packet["approval_summary"]
     assert data["policy_source"] == "memory"
     assert data["source_reference"] == "mcp:policy_yaml"
     assert data["used_defaults"] is False

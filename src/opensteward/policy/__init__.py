@@ -46,7 +46,12 @@ from opensteward.policy.models import (
     ReviewPolicy,
     RiskLevel,
 )
-
+from opensteward.policy.packet import (
+    MaintainerPacketItem,
+    MaintainerPolicyPacket,
+    MaintainerRecommendation,
+    build_maintainer_policy_packet,
+)
 __all__ = [
     "DEFAULT_POLICY_FILENAME",
     "DEFAULT_POLICY_REFERENCE",
@@ -80,4 +85,8 @@ __all__ = [
     "PolicyFindingStatus",
     "PolicyRule",
     "evaluate_contribution_policy",
+    "MaintainerPacketItem",
+    "MaintainerPolicyPacket",
+    "MaintainerRecommendation",
+    "build_maintainer_policy_packet",
 ]

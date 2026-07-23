@@ -6,8 +6,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from opensteward.policy import (
     ContributionPolicyInput,
+    MaintainerPolicyPacket,
     PolicyEvaluationResult,
     PolicySource,
+    build_maintainer_policy_packet,
     evaluate_contribution_policy,
     load_repository_policy_with_metadata,
     parse_repository_policy_with_metadata,
@@ -25,8 +27,8 @@ class RepositoryPolicyEvaluationResponse(BaseModel):
     source_reference: str = Field(min_length=1)
     used_defaults: bool
     policy_version: int = Field(ge=1)
+    packet: MaintainerPolicyPacket
     evaluation: PolicyEvaluationResult
-
 
 def evaluate_repository_policy(
     contribution: ContributionPolicyInput,
@@ -55,11 +57,14 @@ def evaluate_repository_policy(
         contribution=contribution,
     )
 
+    packet = build_maintainer_policy_packet(evaluation)
+
     return RepositoryPolicyEvaluationResponse(
         policy_source=loaded_policy.source,
         source_reference=loaded_policy.source_reference,
         used_defaults=loaded_policy.used_defaults,
         policy_version=loaded_policy.policy.version,
+        packet=packet,
         evaluation=evaluation,
     )
 
