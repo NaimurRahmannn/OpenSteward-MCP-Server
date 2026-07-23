@@ -1,11 +1,5 @@
 version: 1
 
-contributions:
-  ai_assistance:
-    allowed: true
-    disclosure_required: true
-    human_attestation_required: true
-
 pull_requests:
   linked_issue_required_for:
     - public_api

@@ -47,24 +47,6 @@ class ContributionCategory(StrEnum):
     DATABASE_MIGRATION = "database_migration"
     SECURITY = "security"
     DEPENDENCY_ADDITION = "dependency_addition"
-
-
-class AiAssistancePolicy(StrictPolicyModel):
-    """Rules for contributions created with AI assistance."""
-
-    allowed: bool = True
-    disclosure_required: bool = False
-    human_attestation_required: bool = False
-
-
-class ContributionsPolicy(StrictPolicyModel):
-    """General contribution rules."""
-
-    ai_assistance: AiAssistancePolicy = Field(
-        default_factory=AiAssistancePolicy,
-    )
-
-
 class PullRequestPolicy(StrictPolicyModel):
     """Rules applied to incoming pull requests."""
 
@@ -206,11 +188,6 @@ class RepositoryPolicy(StrictPolicyModel):
     """Complete validated OpenSteward repository policy."""
 
     version: Literal[1] = 1
-
-    contributions: ContributionsPolicy = Field(
-        default_factory=ContributionsPolicy,
-    )
-
     pull_requests: PullRequestPolicy = Field(
         default_factory=PullRequestPolicy,
     )

@@ -4,6 +4,9 @@ from opensteward.policy.defaults import (
     DEFAULT_POLICY_REFERENCE,
     create_default_repository_policy,
 )
+from opensteward.policy.inputs import(
+    ContributionPolicyInput
+)
 from opensteward.policy.path_matcher import (
     find_protected_path_matches,
     match_protected_paths,
@@ -21,10 +24,8 @@ from opensteward.policy.loader import (
     parse_repository_policy_with_metadata,
 )
 from opensteward.policy.models import (
-    AiAssistancePolicy,
     AutomationPolicy,
     ContributionCategory,
-    ContributionsPolicy,
     LoadedRepositoryPolicy,
     PolicySource,
     ProtectedPathMatch,
@@ -39,10 +40,8 @@ from opensteward.policy.models import (
 __all__ = [
     "DEFAULT_POLICY_FILENAME",
     "DEFAULT_POLICY_REFERENCE",
-    "AiAssistancePolicy",
     "AutomationPolicy",
     "ContributionCategory",
-    "ContributionsPolicy",
     "LoadedRepositoryPolicy",
     "PolicyLoadError",
     "PolicySource",
@@ -64,4 +63,5 @@ __all__ = [
     "matches_repository_pattern",
     "normalize_repository_path",
     "normalize_repository_pattern",
+    "ContributionPolicyInput",
 ]
