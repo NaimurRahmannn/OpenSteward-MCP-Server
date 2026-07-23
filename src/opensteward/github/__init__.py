@@ -76,6 +76,18 @@ from opensteward.github.contribution_inputs import (
     GitHubIssueReferenceEvidence,
     build_contribution_policy_input_from_snapshot,
 )
+from opensteward.github.assessments import (
+    GitHubPullRequestAssessmentError,
+    GitHubPullRequestAssessmentPolicy,
+    GitHubPullRequestAssessmentRequest,
+    GitHubPullRequestAssessmentResult,
+    GitHubPullRequestAssessmentRunner,
+    GitHubPullRequestAssessmentService,
+    GitHubPullRequestAssessmentSummary,
+)
+from opensteward.github.runtime import (
+    LiveGitHubPullRequestAssessmentRunner,
+)
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
@@ -137,4 +149,12 @@ __all__ = [
     "GitHubIssueLinkageScope",
     "GitHubIssueReferenceEvidence",
     "build_contribution_policy_input_from_snapshot",
+    "GitHubPullRequestAssessmentError",
+    "GitHubPullRequestAssessmentPolicy",
+    "GitHubPullRequestAssessmentRequest",
+    "GitHubPullRequestAssessmentResult",
+    "GitHubPullRequestAssessmentRunner",
+    "GitHubPullRequestAssessmentService",
+    "GitHubPullRequestAssessmentSummary",
+    "LiveGitHubPullRequestAssessmentRunner",
 ]
