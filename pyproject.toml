@@ -33,7 +33,7 @@ packages = ["src/opensteward"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
-asyncio_mode = "auto"
+asyncio_mode = "strict"
 
 [tool.ruff]
 line-length = 100
