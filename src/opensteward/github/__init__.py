@@ -66,6 +66,12 @@ from opensteward.github.historical_paths import (
     GitHubHistoricalPullRequestPathEnricher,
     GitHubHistoricalPullRequestPathEvidence,
 )
+from opensteward.github.historical_snapshot import (
+    GitHubHistoricalKnowledgeSnapshotError,
+    GitHubHistoricalKnowledgeSnapshotOptions,
+    GitHubHistoricalKnowledgeSnapshotResult,
+    GitHubHistoricalKnowledgeSnapshotService,
+)
 from opensteward.github.installation_tokens import (
     INSTALLATION_TOKEN_REFRESH_MARGIN,
     GitHubInstallationToken,
@@ -160,6 +166,10 @@ __all__ = [
     "GitHubHistoricalKnowledgeCollectionResult",
     "GitHubHistoricalKnowledgeCollectionStats",
     "GitHubHistoricalKnowledgeCollector",
+    "GitHubHistoricalKnowledgeSnapshotError",
+    "GitHubHistoricalKnowledgeSnapshotOptions",
+    "GitHubHistoricalKnowledgeSnapshotResult",
+    "GitHubHistoricalKnowledgeSnapshotService",
     "GitHubHistoricalPathEnrichmentError",
     "GitHubHistoricalPathEnrichmentOptions",
     "GitHubHistoricalPathEnrichmentResult",
