@@ -16,15 +16,33 @@ from opensteward.github.app_jwt import (
     GitHubJwtGenerationError,
     generate_github_app_jwt,
 )
+from opensteward.github.installation_tokens import (
+    INSTALLATION_TOKEN_REFRESH_MARGIN,
+    GitHubInstallationToken,
+    GitHubInstallationTokenError,
+    GitHubInstallationTokenProvider,
+    GitHubInstallationTokenScope,
+    GitHubPermissionLevel,
+    GitHubRepositorySelection,
+    GitHubTokenRepository,
+)
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
+    "INSTALLATION_TOKEN_REFRESH_MARGIN",
     "GitHubAccountType",
     "GitHubAppJwt",
     "GitHubAppSettings",
     "GitHubConfigurationError",
     "GitHubInstallationRef",
+    "GitHubInstallationToken",
+    "GitHubInstallationTokenError",
+    "GitHubInstallationTokenProvider",
+    "GitHubInstallationTokenScope",
     "GitHubJwtGenerationError",
+    "GitHubPermissionLevel",
     "GitHubRepositoryRef",
+    "GitHubRepositorySelection",
+    "GitHubTokenRepository",
     "generate_github_app_jwt",
     "get_github_settings",
 ]
