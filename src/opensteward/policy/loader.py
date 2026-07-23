@@ -100,13 +100,14 @@ def parse_repository_policy_with_metadata(
     content: str,
     *,
     source: str = "<memory>",
+    policy_source: PolicySource = PolicySource.MEMORY,
 ) -> LoadedRepositoryPolicy:
     """Parse YAML policy content and return policy provenance."""
 
     return _parse_repository_policy_with_source(
         content,
         source_reference=source,
-        successful_source=PolicySource.MEMORY,
+        successful_source=policy_source,
     )
 
 

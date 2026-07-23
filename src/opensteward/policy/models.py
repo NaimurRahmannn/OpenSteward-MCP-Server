@@ -35,6 +35,7 @@ class PolicySource(StrEnum):
 
     DEFAULT = "default"
     REPOSITORY_FILE = "repository_file"
+    GITHUB_REPOSITORY = "github_repository"
     MEMORY = "memory"
 
 class ContributionCategory(StrEnum):

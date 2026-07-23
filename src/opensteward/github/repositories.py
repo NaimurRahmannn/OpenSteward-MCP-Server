@@ -41,6 +41,11 @@ class GitHubRepositoryPolicyFileError(ValueError):
 class GitHubRepositoryOwner(StrictGitHubModel):
     """Minimal GitHub account information for a repository owner."""
 
+    model_config = ConfigDict(
+        extra="ignore",
+        str_strip_whitespace=True,
+    )
+
     id: int = Field(gt=0)
     login: str = Field(min_length=1)
     type: str = Field(min_length=1)
@@ -48,6 +53,11 @@ class GitHubRepositoryOwner(StrictGitHubModel):
 
 class GitHubRepositoryMetadata(StrictGitHubModel):
     """Repository information needed by OpenSteward."""
+
+    model_config = ConfigDict(
+        extra="ignore",
+        str_strip_whitespace=True,
+    )
 
     id: int = Field(gt=0)
     name: str = Field(min_length=1)
