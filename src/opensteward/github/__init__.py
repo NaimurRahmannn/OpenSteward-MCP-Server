@@ -26,6 +26,16 @@ from opensteward.github.installation_tokens import (
     GitHubRepositorySelection,
     GitHubTokenRepository,
 )
+from opensteward.github.rest_client import (
+    DEFAULT_GITHUB_ACCEPT,
+    GitHubPaginationLinks,
+    GitHubRateLimitMetadata,
+    GitHubRestClient,
+    GitHubRestError,
+    GitHubRestResponse,
+    GitHubRestResponseError,
+    GitHubRestTransportError,
+)
 __all__ = [
     "GITHUB_APP_JWT_ALGORITHM",
     "INSTALLATION_TOKEN_REFRESH_MARGIN",
@@ -45,4 +55,12 @@ __all__ = [
     "GitHubTokenRepository",
     "generate_github_app_jwt",
     "get_github_settings",
+    "DEFAULT_GITHUB_ACCEPT",
+    "GitHubPaginationLinks",
+    "GitHubRateLimitMetadata",
+    "GitHubRestClient",
+    "GitHubRestError",
+    "GitHubRestResponse",
+    "GitHubRestResponseError",
+    "GitHubRestTransportError",
 ]
