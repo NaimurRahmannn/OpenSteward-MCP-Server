@@ -10,6 +10,18 @@ from opensteward.knowledge.decision_candidates import (
     KnowledgeDecisionCandidateSkipReason,
     extract_knowledge_decision_candidates,
 )
+from opensteward.knowledge.decision_resolution import (
+    MAX_KNOWLEDGE_DECISION_OUTCOME_LINKS,
+    KnowledgeDecisionOutcomeEffect,
+    KnowledgeDecisionOutcomeLink,
+    KnowledgeDecisionResolution,
+    KnowledgeDecisionResolutionError,
+    KnowledgeDecisionResolutionOptions,
+    KnowledgeDecisionResolutionReason,
+    KnowledgeDecisionResolutionResult,
+    KnowledgeDecisionResolutionStats,
+    resolve_knowledge_decision_candidates,
+)
 from opensteward.knowledge.hybrid_ranking import (
     KNOWLEDGE_DETERMINISTIC_LABEL_WEIGHT,
     KNOWLEDGE_DETERMINISTIC_LEXICAL_WEIGHT,
@@ -129,6 +141,14 @@ __all__ = [
     "KnowledgeDecisionCandidateRule",
     "KnowledgeDecisionCandidateSkippedSource",
     "KnowledgeDecisionCandidateSkipReason",
+    "KnowledgeDecisionOutcomeEffect",
+    "KnowledgeDecisionOutcomeLink",
+    "KnowledgeDecisionResolution",
+    "KnowledgeDecisionResolutionError",
+    "KnowledgeDecisionResolutionOptions",
+    "KnowledgeDecisionResolutionReason",
+    "KnowledgeDecisionResolutionResult",
+    "KnowledgeDecisionResolutionStats",
     "KnowledgeHybridRankedMatch",
     "KnowledgeHybridRankingMode",
     "KnowledgeHybridRankingOptions",
@@ -166,6 +186,7 @@ __all__ = [
     "MAX_KNOWLEDGE_HYBRID_RESULTS",
     "MAX_KNOWLEDGE_HYBRID_SCORE",
     "MAX_KNOWLEDGE_DECISION_CANDIDATES",
+    "MAX_KNOWLEDGE_DECISION_OUTCOME_LINKS",
     "MAX_KNOWLEDGE_EXACT_PHRASES",
     "MAX_KNOWLEDGE_IDENTIFIERS",
     "MAX_KNOWLEDGE_LEXICAL_EVIDENCE_PER_MATCH",
@@ -213,5 +234,6 @@ __all__ = [
     "build_knowledge_lexical_document",
     "extract_knowledge_decision_candidates",
     "rank_knowledge_hybrid_corpus",
+    "resolve_knowledge_decision_candidates",
     "search_knowledge_lexical_corpus",
 ]
