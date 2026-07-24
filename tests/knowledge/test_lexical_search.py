@@ -340,13 +340,15 @@ def test_match_rejects_duplicate_evidence_identity_after_nfkc_casefold() -> None
 
 
 def test_search_result_strictness_and_computed_counts() -> None:
+    options = KnowledgeLexicalSearchOptions(max_results=1)
     result = search(
         make_query(text="parser"),
         make_item(external_id="1"),
         make_item(external_id="2"),
-        options=KnowledgeLexicalSearchOptions(max_results=1),
+        options=options,
     )
 
+    assert result.options == options
     assert result.returned_count == 1
     assert result.matched_document_count == 2
     assert result.truncated is True
@@ -358,6 +360,24 @@ def test_search_result_strictness_and_computed_counts() -> None:
                 "complete": True,
             }
         )
+
+
+def test_search_results_record_default_and_custom_options() -> None:
+    default_result = search(make_query(text="parser"))
+    custom_options = KnowledgeLexicalSearchOptions(
+        max_results=7,
+        minimum_score=3,
+    )
+    custom_result = search(
+        make_query(text="parser"),
+        options=custom_options,
+    )
+
+    assert default_result.options == KnowledgeLexicalSearchOptions(
+        max_results=20,
+        minimum_score=1,
+    )
+    assert custom_result.options == custom_options
 
 
 def test_repository_mismatch_raises_before_scoring() -> None:
@@ -1254,6 +1274,7 @@ def test_result_rejects_impossible_counts(
         KnowledgeLexicalSearchResult(
             repository=REPOSITORY,
             query=make_query(text="parser"),
+            options=KnowledgeLexicalSearchOptions(),
             corpus_total_count=corpus_count,
             eligible_document_count=eligible_count,
             matched_document_count=matched_count,
@@ -1269,6 +1290,7 @@ def test_result_rejects_incorrect_ranking_and_zero_score_match() -> None:
         KnowledgeLexicalSearchResult(
             repository=REPOSITORY,
             query=make_query(text="parser"),
+            options=KnowledgeLexicalSearchOptions(),
             corpus_total_count=2,
             eligible_document_count=2,
             matched_document_count=2,
@@ -1282,14 +1304,42 @@ def test_result_rejects_incorrect_ranking_and_zero_score_match() -> None:
         updated_at=UPDATED_AT,
         evidence=[],
     )
-    with pytest.raises(ValidationError, match="positive score"):
+    with pytest.raises(ValidationError, match="minimum_score"):
         KnowledgeLexicalSearchResult(
             repository=REPOSITORY,
             query=make_query(text="parser"),
+            options=KnowledgeLexicalSearchOptions(),
             corpus_total_count=1,
             eligible_document_count=1,
             matched_document_count=1,
             matches=[zero_score],
+        )
+
+
+def test_result_enforces_option_threshold_and_result_limit() -> None:
+    first = make_match(item=make_item(external_id="1"))
+    second = make_match(item=make_item(external_id="2"))
+
+    with pytest.raises(ValidationError, match="minimum_score"):
+        KnowledgeLexicalSearchResult(
+            repository=REPOSITORY,
+            query=make_query(text="parser"),
+            options=KnowledgeLexicalSearchOptions(minimum_score=6),
+            corpus_total_count=1,
+            eligible_document_count=1,
+            matched_document_count=1,
+            matches=[first],
+        )
+
+    with pytest.raises(ValidationError, match="max_results"):
+        KnowledgeLexicalSearchResult(
+            repository=REPOSITORY,
+            query=make_query(text="parser"),
+            options=KnowledgeLexicalSearchOptions(max_results=1),
+            corpus_total_count=2,
+            eligible_document_count=2,
+            matched_document_count=2,
+            matches=[first, second],
         )
 
 
@@ -1306,6 +1356,10 @@ def test_result_json_includes_evidence_computed_fields_enums_and_utc() -> None:
     payload = result.model_dump(mode="json")
     match = payload["matches"][0]
 
+    assert payload["options"] == {
+        "max_results": 20,
+        "minimum_score": 1,
+    }
     assert match["state"] == "closed"
     assert match["decision_significance"] == "high"
     assert match["updated_at"] == "2026-05-03T12:00:00Z"

@@ -177,6 +177,7 @@ class KnowledgeLexicalSearchResult(StrictKnowledgeModel):
 
     repository: KnowledgeRepositoryRef
     query: KnowledgeLexicalQuery
+    options: KnowledgeLexicalSearchOptions
     corpus_total_count: int = Field(ge=0)
     eligible_document_count: int = Field(ge=0)
     matched_document_count: int = Field(ge=0)
@@ -205,8 +206,17 @@ class KnowledgeLexicalSearchResult(StrictKnowledgeModel):
             raise ValueError("Eligible count must be at least the matched count.")
         if self.matched_document_count < len(self.matches):
             raise ValueError("Matched count must be at least the returned count.")
-        if any(match.score < 1 for match in self.matches):
-            raise ValueError("Returned lexical matches must have a positive score.")
+        if any(
+            match.score < self.options.minimum_score
+            for match in self.matches
+        ):
+            raise ValueError(
+                "Returned lexical matches must meet options.minimum_score."
+            )
+        if len(self.matches) > self.options.max_results:
+            raise ValueError(
+                "Returned lexical matches must not exceed options.max_results."
+            )
 
         ranking = [
             (-match.raw_score, match.item_key)
@@ -701,6 +711,7 @@ def search_knowledge_lexical_corpus(
     return KnowledgeLexicalSearchResult(
         repository=corpus.repository,
         query=query,
+        options=effective_options,
         corpus_total_count=corpus.total_count,
         eligible_document_count=len(eligible_documents),
         matched_document_count=matched_document_count,
