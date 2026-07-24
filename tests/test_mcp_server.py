@@ -9,6 +9,8 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import opensteward.mcp.github_capabilities as github_capabilities
 from opensteward.github import (
+    GitHubPullRequestAssessmentRequest,
+    GitHubPullRequestAssessmentResult,
     GitHubRelatedWorkRequest,
     GitHubRelatedWorkResult,
     GitHubRelatedWorkSnapshotSummary,
@@ -27,7 +29,10 @@ from opensteward.knowledge import (
     KnowledgeSourceKind,
 )
 from opensteward.mcp.server import mcp
-from tests.github.test_review_cost import completed_review_cost_result
+from tests.github.test_review_cost import (
+    assessment_result,
+    completed_review_cost_result,
+)
 
 
 @pytest.fixture
@@ -119,6 +124,21 @@ class StaticRelatedWorkRunner:
         return self.result
 
 
+class StaticAssessmentRunner:
+    """Return one prepared legacy assessment through the registered tool."""
+
+    def __init__(self, result: GitHubPullRequestAssessmentResult) -> None:
+        self.result = result
+        self.calls: list[GitHubPullRequestAssessmentRequest] = []
+
+    async def assess(
+        self,
+        request: GitHubPullRequestAssessmentRequest,
+    ) -> GitHubPullRequestAssessmentResult:
+        self.calls.append(request)
+        return self.result
+
+
 class StaticReviewCostRunner:
     """Return one prepared review-cost result through the registered tool."""
 
@@ -157,6 +177,63 @@ async def test_mcp_server_exposes_expected_tools(
         str(resource.uri) == "steward://repository/policy"
         for resource in resources.resources
     )
+
+
+@pytest.mark.anyio
+async def test_assess_pull_request_schema_preserves_legacy_public_fields(
+    client_session: ClientSession,
+) -> None:
+    result = await client_session.list_tools()
+    tool = next(tool for tool in result.tools if tool.name == "assess_pull_request")
+
+    assert tool.outputSchema is not None
+    assert set(tool.outputSchema["properties"]) == {
+        "read_only",
+        "installation_id",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    }
+    assert "installation_id" in tool.outputSchema["required"]
+
+
+@pytest.mark.anyio
+async def test_assess_pull_request_invocation_preserves_legacy_output(
+    client_session: ClientSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = assessment_result()
+    runner = StaticAssessmentRunner(expected)
+    monkeypatch.setattr(
+        github_capabilities,
+        "_assessment_runner",
+        runner,
+    )
+
+    result = await client_session.call_tool(
+        "assess_pull_request",
+        {
+            "installation_id": 73,
+            "repository": {
+                "owner": "acme",
+                "name": "framework",
+            },
+            "pull_number": 17,
+        },
+    )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    data = result.structuredContent
+    assert data["installation_id"] == 41
+    assert "snapshot" not in data
+    assert "repository_policy" not in data
+    for field in ("summary", "policy", "conversion", "packet", "evaluation"):
+        assert field in data
+    assert len(runner.calls) == 1
+    assert runner.calls[0].installation_id == 73
 
 
 @pytest.mark.anyio
@@ -269,6 +346,20 @@ async def test_assess_review_cost_schema_is_structured(
         "level",
         "complete",
     } <= set(tool.outputSchema["properties"])
+    assessment_property = tool.outputSchema["properties"][
+        "pull_request_assessment"
+    ]
+    assessment_definition = tool.outputSchema["$defs"][
+        assessment_property["$ref"].removeprefix("#/$defs/")
+    ]
+    assert set(assessment_definition["properties"]) == {
+        "read_only",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    }
 
 
 @pytest.mark.anyio
@@ -309,6 +400,18 @@ async def test_assess_review_cost_invocation_returns_explainable_coverage(
     assert data["related_work"]["source_history_complete"] is True
     assert data["related_work"]["ranking_coverage_complete"] is True
     assert data["related_work"]["result_truncated"] is False
+    nested_assessment = data["pull_request_assessment"]
+    assert {
+        "read_only",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    } == set(nested_assessment)
+    assert "installation_id" not in nested_assessment
+    assert "snapshot" not in nested_assessment
+    assert "repository_policy" not in nested_assessment
     assert len(runner.calls) == 1
     assert runner.calls[0].installation_id == 73
     serialized = str(data).lower()

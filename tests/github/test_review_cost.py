@@ -707,9 +707,17 @@ async def test_result_serialization_is_concise_and_excludes_credentials() -> Non
     assert data["review_cost"]["contributions"]
     assert data["score"] == result.score
     assert data["level"] == result.level.value
-    assert "installation_id" not in str(data)
-    assert "private_key" not in str(data)
-    assert "token_scope" not in str(data)
+    serialized = str(data).casefold()
+    for sensitive_text in (
+        "installation_id",
+        "installation token",
+        "installation_token",
+        "private key",
+        "private_key",
+        "token scope",
+        "token_scope",
+    ):
+        assert sensitive_text not in serialized
     assert result.complete is True
 
 
@@ -726,3 +734,55 @@ def test_assessment_contract_exposes_authoritative_review_cost_evidence() -> Non
         == 500
     )
     assert result.policy.policy_file_present is True
+
+    data = result.model_dump(mode="json")
+    assert data["installation_id"] == 41
+    assert "snapshot" not in data
+    assert "repository_policy" not in data
+    assert {
+        "read_only",
+        "installation_id",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    } == set(data)
+
+    schema = result.model_json_schema()
+    assert set(schema["properties"]) == set(data)
+    assert "installation_id" in schema["required"]
+
+
+@pytest.mark.asyncio
+async def test_review_cost_nested_assessment_is_public_and_redacted() -> None:
+    result = await completed_review_cost_result()
+
+    data = result.model_dump(mode="json")
+    assessment = data["pull_request_assessment"]
+    assert {
+        "read_only",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    } == set(assessment)
+    assert "installation_id" not in assessment
+    assert "snapshot" not in assessment
+    assert "repository_policy" not in assessment
+    assert {
+        "repository",
+        "pull_request",
+        "pull_request_assessment",
+        "related_work",
+        "review_cost",
+        "warnings",
+        "score",
+        "level",
+        "complete",
+    } == set(data)
+    serialized = str(data).casefold()
+    assert "installation_id" not in serialized
+    assert "snapshot" not in assessment
+    assert "repository_policy" not in serialized

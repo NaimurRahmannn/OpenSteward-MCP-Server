@@ -2,11 +2,12 @@
 
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Protocol, Self
+from typing import Annotated, Any, Literal, Protocol, Self
 
 from pydantic import (
     ConfigDict,
     Field,
+    PlainSerializer,
     computed_field,
     field_validator,
     model_serializer,
@@ -14,10 +15,15 @@ from pydantic import (
 )
 
 from opensteward.github.assessments import (
+    GitHubPullRequestAssessmentPolicy,
     GitHubPullRequestAssessmentRequest,
     GitHubPullRequestAssessmentResult,
+    GitHubPullRequestAssessmentSummary,
 )
-from opensteward.github.contribution_inputs import GitHubContributionInputOptions
+from opensteward.github.contribution_inputs import (
+    GitHubContributionInputOptions,
+    GitHubContributionInputResult,
+)
 from opensteward.github.historical_knowledge import (
     knowledge_repository_from_github,
 )
@@ -42,6 +48,8 @@ from opensteward.knowledge import (
 from opensteward.policy import (
     DEFAULT_POLICY_FILENAME,
     ContributionCategory,
+    MaintainerPolicyPacket,
+    PolicyEvaluationResult,
     PolicySource,
     match_protected_paths,
     normalize_repository_path,
@@ -126,6 +134,39 @@ class GitHubReviewCostPullRequestSummary(StrictGitHubModel):
         return assessed_at.astimezone(UTC)
 
 
+class _GitHubReviewCostAssessmentOutput(StrictGitHubModel):
+    """Legacy public assessment fields safe to nest in review-cost output."""
+
+    read_only: Literal[True] = True
+    summary: GitHubPullRequestAssessmentSummary
+    policy: GitHubPullRequestAssessmentPolicy
+    conversion: GitHubContributionInputResult
+    packet: MaintainerPolicyPacket
+    evaluation: PolicyEvaluationResult
+
+
+def _redact_pull_request_assessment(
+    assessment: GitHubPullRequestAssessmentResult,
+) -> _GitHubReviewCostAssessmentOutput:
+    return _GitHubReviewCostAssessmentOutput(
+        read_only=assessment.read_only,
+        summary=assessment.summary,
+        policy=assessment.policy,
+        conversion=assessment.conversion,
+        packet=assessment.packet,
+        evaluation=assessment.evaluation,
+    )
+
+
+_ReviewCostAssessmentResult = Annotated[
+    GitHubPullRequestAssessmentResult,
+    PlainSerializer(
+        _redact_pull_request_assessment,
+        return_type=_GitHubReviewCostAssessmentOutput,
+    ),
+]
+
+
 def _stable_unique(*groups: list[str]) -> list[str]:
     values: list[str] = []
     seen: set[str] = set()
@@ -144,7 +185,7 @@ class GitHubReviewCostResult(StrictGitHubModel):
 
     repository: GitHubRepositoryRef
     pull_request: GitHubReviewCostPullRequestSummary
-    pull_request_assessment: GitHubPullRequestAssessmentResult
+    pull_request_assessment: _ReviewCostAssessmentResult
     related_work: GitHubRelatedWorkResult
     review_cost: ReviewCostAssessment
     warnings: list[str]
@@ -213,7 +254,9 @@ class GitHubReviewCostResult(StrictGitHubModel):
                 exclude_computed_fields=True,
             ),
             "pull_request_assessment": (
-                self.pull_request_assessment.model_dump(
+                _redact_pull_request_assessment(
+                    self.pull_request_assessment
+                ).model_dump(
                     mode=mode,
                     exclude_computed_fields=True,
                 )

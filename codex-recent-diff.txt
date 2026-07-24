@@ -1,0 +1,4211 @@
+diff --git a/src/opensteward/github/__init__.py b/src/opensteward/github/__init__.py
+index fbc4ab1..5d15faa 100644
+--- a/src/opensteward/github/__init__.py
++++ b/src/opensteward/github/__init__.py
+@@ -133,9 +133,19 @@ from opensteward.github.rest_client import (
+     GitHubRestResponseError,
+     GitHubRestTransportError,
+ )
++from opensteward.github.review_cost import (
++    DEFAULT_REVIEW_COST_PREFERRED_DIFF_SIZE,
++    GitHubReviewCostError,
++    GitHubReviewCostPullRequestSummary,
++    GitHubReviewCostRequest,
++    GitHubReviewCostResult,
++    GitHubReviewCostRunner,
++    GitHubReviewCostService,
++)
+ from opensteward.github.runtime import (
+     LiveGitHubPullRequestAssessmentRunner,
+     LiveGitHubRelatedWorkRunner,
++    LiveGitHubReviewCostRunner,
+ )
+ from opensteward.github.settings import (
+     GitHubAppSettings,
+@@ -199,6 +209,7 @@ __all__ = [
+     "get_github_settings",
+     "knowledge_repository_from_github",
+     "DEFAULT_GITHUB_ACCEPT",
++    "DEFAULT_REVIEW_COST_PREFERRED_DIFF_SIZE",
+     "GitHubPaginationLinks",
+     "GitHubRateLimitMetadata",
+     "GitHubRestClient",
+@@ -213,6 +224,12 @@ __all__ = [
+     "GitHubRepositoryPolicyFileError",
+     "GitHubRepositoryPolicyResult",
+     "GitHubRepositoryService",
++    "GitHubReviewCostError",
++    "GitHubReviewCostPullRequestSummary",
++    "GitHubReviewCostRequest",
++    "GitHubReviewCostResult",
++    "GitHubReviewCostRunner",
++    "GitHubReviewCostService",
+     "GitHubRelatedWorkError",
+     "GitHubRelatedWorkQuery",
+     "GitHubRelatedWorkRequest",
+@@ -256,4 +273,5 @@ __all__ = [
+     "GitHubPullRequestAssessmentSummary",
+     "LiveGitHubPullRequestAssessmentRunner",
+     "LiveGitHubRelatedWorkRunner",
++    "LiveGitHubReviewCostRunner",
+ ]
+diff --git a/src/opensteward/github/assessments.py b/src/opensteward/github/assessments.py
+index bd4f59c..bd09446 100644
+--- a/src/opensteward/github/assessments.py
++++ b/src/opensteward/github/assessments.py
+@@ -3,6 +3,7 @@
+ from typing import Literal, Protocol
+ 
+ from pydantic import (
++    ConfigDict,
+     Field,
+     field_validator,
+ )
+@@ -29,6 +30,7 @@ from opensteward.policy import (
+     MaintainerPolicyPacket,
+     PolicyEvaluationResult,
+     PolicySource,
++    RepositoryPolicy,
+     build_maintainer_policy_packet,
+     evaluate_contribution_policy,
+     normalize_repository_path,
+@@ -181,12 +183,19 @@ class GitHubPullRequestAssessmentResult(
+ ):
+     """Complete evidence-backed GitHub PR assessment."""
+ 
++    model_config = ConfigDict(json_schema_mode_override="serialization")
++
+     read_only: Literal[True] = True
+ 
+     installation_id: int = Field(
+         gt=0,
++        exclude=True,
+     )
+ 
++    snapshot: GitHubPullRequestSnapshot
++
++    repository_policy: RepositoryPolicy
++
+     summary: GitHubPullRequestAssessmentSummary
+ 
+     policy: GitHubPullRequestAssessmentPolicy
+@@ -484,6 +493,10 @@ class GitHubPullRequestAssessmentService:
+             installation_id=(
+                 request.installation_id
+             ),
++            snapshot=snapshot,
++            repository_policy=(
++                policy_result.loaded_policy.policy
++            ),
+             summary=_build_summary(
+                 snapshot
+             ),
+@@ -494,4 +507,4 @@ class GitHubPullRequestAssessmentService:
+             conversion=conversion,
+             packet=packet,
+             evaluation=evaluation,
+-        )
+\ No newline at end of file
++        )
+diff --git a/src/opensteward/github/pull_requests.py b/src/opensteward/github/pull_requests.py
+index a031a24..17b8112 100644
+--- a/src/opensteward/github/pull_requests.py
++++ b/src/opensteward/github/pull_requests.py
+@@ -25,7 +25,6 @@ from opensteward.github.rest_client import (
+ )
+ from opensteward.policy import normalize_repository_path
+ 
+-
+ GITHUB_PAGE_SIZE = 100
+ MAX_PULL_REQUEST_FILES = 3_000
+ MAX_PAGINATION_PAGES = 100
+@@ -120,6 +119,7 @@ class GitHubPullRequestDetails(StrictGitHubModel):
+     mergeable_state: str | None = None
+ 
+     html_url: str = Field(min_length=1)
++    labels: list[str] = Field(default_factory=list)
+ 
+     author: GitHubPullRequestActor
+ 
+@@ -136,6 +136,18 @@ class GitHubPullRequestDetails(StrictGitHubModel):
+     closed_at: datetime | None = None
+     merged_at: datetime | None = None
+ 
++    @field_validator("labels")
++    @classmethod
++    def validate_labels(cls, labels: list[str]) -> list[str]:
++        """Require non-empty labels that are unique case-insensitively."""
++
++        if any(not label for label in labels):
++            raise ValueError("Pull-request labels must not be empty.")
++        keys = [label.casefold() for label in labels]
++        if len(keys) != len(set(keys)):
++            raise ValueError("Pull-request labels must be unique case-insensitively.")
++        return labels
++
+     @computed_field
+     @property
+     def diff_lines(self) -> int:
+@@ -336,6 +348,10 @@ class _ApiActor(_GitHubApiModel):
+     type: str = Field(min_length=1)
+ 
+ 
++class _ApiLabel(_GitHubApiModel):
++    name: str = Field(min_length=1)
++
++
+ class _ApiRepository(_GitHubApiModel):
+     id: int = Field(gt=0)
+     name: str = Field(min_length=1)
+@@ -363,6 +379,7 @@ class _ApiPullRequest(_GitHubApiModel):
+     mergeable_state: str | None = None
+ 
+     html_url: str = Field(min_length=1)
++    labels: list[_ApiLabel] = Field(default_factory=list)
+ 
+     user: _ApiActor
+     base: _ApiPullRequestBranch
+@@ -514,6 +531,14 @@ def _convert_pull_request(
+ 
+     assert author is not None
+ 
++    labels: list[str] = []
++    seen_labels: set[str] = set()
++    for label in pull_request.labels:
++        key = label.name.casefold()
++        if key not in seen_labels:
++            seen_labels.add(key)
++            labels.append(label.name)
++
+     return GitHubPullRequestDetails(
+         id=pull_request.id,
+         number=pull_request.number,
+@@ -525,6 +550,7 @@ def _convert_pull_request(
+         mergeable=pull_request.mergeable,
+         mergeable_state=pull_request.mergeable_state,
+         html_url=pull_request.html_url,
++        labels=labels,
+         author=author,
+         base=_convert_branch(
+             pull_request.base
+@@ -978,4 +1004,4 @@ class GitHubPullRequestService:
+         raise GitHubPullRequestSnapshotError(
+             "Check-run pagination exceeded the configured "
+             "safety limit."
+-        )
+\ No newline at end of file
++        )
+diff --git a/src/opensteward/github/review_cost.py b/src/opensteward/github/review_cost.py
+new file mode 100644
+index 0000000..15f3520
+--- /dev/null
++++ b/src/opensteward/github/review_cost.py
+@@ -0,0 +1,607 @@
++"""GitHub adaptation and orchestration for evidence-derived review cost."""
++
++from collections.abc import Callable
++from datetime import UTC, datetime
++from typing import Any, Protocol, Self
++
++from pydantic import (
++    ConfigDict,
++    Field,
++    computed_field,
++    field_validator,
++    model_serializer,
++    model_validator,
++)
++
++from opensteward.github.assessments import (
++    GitHubPullRequestAssessmentRequest,
++    GitHubPullRequestAssessmentResult,
++)
++from opensteward.github.contribution_inputs import GitHubContributionInputOptions
++from opensteward.github.historical_knowledge import (
++    knowledge_repository_from_github,
++)
++from opensteward.github.historical_snapshot import (
++    GitHubHistoricalKnowledgeSnapshotOptions,
++)
++from opensteward.github.models import GitHubRepositoryRef, StrictGitHubModel
++from opensteward.github.related_work import (
++    GitHubRelatedWorkQuery,
++    GitHubRelatedWorkRequest,
++    GitHubRelatedWorkResult,
++)
++from opensteward.knowledge import (
++    DecisionSignificance,
++    KnowledgeItemReference,
++    KnowledgeItemState,
++    KnowledgeItemType,
++    KnowledgeLexicalQuery,
++    KnowledgeRelatedWorkOptions,
++    KnowledgeSourceKind,
++)
++from opensteward.policy import (
++    DEFAULT_POLICY_FILENAME,
++    ContributionCategory,
++    PolicySource,
++    match_protected_paths,
++    normalize_repository_path,
++)
++from opensteward.review_intelligence import (
++    ReviewCostAssessment,
++    ReviewCostAssessmentInput,
++    ReviewCostAssessmentOptions,
++    ReviewCostChangedFile,
++    ReviewCostChangeType,
++    ReviewCostHistoricalContext,
++    ReviewCostLevel,
++)
++
++DEFAULT_REVIEW_COST_PREFERRED_DIFF_SIZE = 700
++
++
++class GitHubReviewCostError(ValueError):
++    """Raised when GitHub review-cost orchestration is inconsistent."""
++
++
++class GitHubReviewCostRequest(StrictGitHubModel):
++    """Input for one live evidence-derived GitHub review-cost assessment."""
++
++    installation_id: int = Field(gt=0)
++    repository: GitHubRepositoryRef
++    pull_number: int = Field(gt=0)
++    policy_path: str = DEFAULT_POLICY_FILENAME
++    explicit_categories: list[ContributionCategory] = Field(default_factory=list)
++    conversion_options: GitHubContributionInputOptions = Field(
++        default_factory=GitHubContributionInputOptions
++    )
++    snapshot_options: GitHubHistoricalKnowledgeSnapshotOptions = Field(
++        default_factory=GitHubHistoricalKnowledgeSnapshotOptions
++    )
++    related_work_options: KnowledgeRelatedWorkOptions = Field(
++        default_factory=KnowledgeRelatedWorkOptions
++    )
++    review_cost_options: ReviewCostAssessmentOptions = Field(
++        default_factory=ReviewCostAssessmentOptions
++    )
++
++    @field_validator("policy_path")
++    @classmethod
++    def normalize_policy_path(cls, policy_path: str) -> str:
++        """Reuse the existing assessment request's path validation."""
++
++        return normalize_repository_path(policy_path)
++
++    @field_validator("explicit_categories")
++    @classmethod
++    def validate_categories(
++        cls,
++        categories: list[ContributionCategory],
++    ) -> list[ContributionCategory]:
++        if len(categories) != len(set(categories)):
++            raise ValueError("Explicit contribution categories must be unique.")
++        return categories
++
++
++class GitHubReviewCostPullRequestSummary(StrictGitHubModel):
++    """Concise pull-request identity and structural totals."""
++
++    repository: GitHubRepositoryRef
++    pull_number: int = Field(gt=0)
++    title: str = Field(min_length=1)
++    url: str | None
++    base_sha: str = Field(min_length=1)
++    head_sha: str = Field(min_length=1)
++    draft: bool
++    additions: int = Field(ge=0)
++    deletions: int = Field(ge=0)
++    changed_files: int = Field(ge=0)
++    commits: int = Field(ge=0)
++    assessed_at: datetime
++
++    @field_validator("assessed_at")
++    @classmethod
++    def normalize_assessed_at(cls, assessed_at: datetime) -> datetime:
++        if assessed_at.tzinfo is None or assessed_at.utcoffset() is None:
++            raise ValueError("assessed_at must be timezone-aware.")
++        return assessed_at.astimezone(UTC)
++
++
++def _stable_unique(*groups: list[str]) -> list[str]:
++    values: list[str] = []
++    seen: set[str] = set()
++    for group in groups:
++        for value in group:
++            if value not in seen:
++                seen.add(value)
++                values.append(value)
++    return values
++
++
++class GitHubReviewCostResult(StrictGitHubModel):
++    """GitHub evidence and explainable review-cost output."""
++
++    model_config = ConfigDict(json_schema_mode_override="serialization")
++
++    repository: GitHubRepositoryRef
++    pull_request: GitHubReviewCostPullRequestSummary
++    pull_request_assessment: GitHubPullRequestAssessmentResult
++    related_work: GitHubRelatedWorkResult
++    review_cost: ReviewCostAssessment
++    warnings: list[str]
++
++    @field_validator("warnings")
++    @classmethod
++    def validate_warning_text(cls, warnings: list[str]) -> list[str]:
++        if any(not warning for warning in warnings):
++            raise ValueError("GitHub review-cost warnings must not be empty.")
++        if len(warnings) != len(set(warnings)):
++            raise ValueError("GitHub review-cost warnings must be unique.")
++        return warnings
++
++    @model_validator(mode="after")
++    def validate_result(self) -> Self:
++        if self.pull_request.repository != self.repository:
++            raise ValueError("Pull-request summary must belong to repository.")
++        assessment_summary = self.pull_request_assessment.summary
++        if (
++            assessment_summary.repository != self.repository
++            or assessment_summary.pull_number != self.pull_request.pull_number
++        ):
++            raise ValueError(
++                "Pull-request assessment must identify the summarized pull request."
++            )
++        if self.related_work.repository != self.repository:
++            raise ValueError("Related work must belong to repository.")
++        knowledge_repository = knowledge_repository_from_github(self.repository)
++        if self.review_cost.repository != knowledge_repository:
++            raise ValueError("Review cost must use the GitHub knowledge repository.")
++        reference = self.review_cost.pull_request
++        if (
++            reference.repository != knowledge_repository
++            or reference.item_type != KnowledgeItemType.PULL_REQUEST
++            or reference.external_id != str(self.pull_request.pull_number)
++        ):
++            raise ValueError("Review cost must identify the summarized pull request.")
++        if self.review_cost.assessed_at != self.pull_request.assessed_at:
++            raise ValueError("Review-cost time must match pull-request summary time.")
++        expected_warnings = _stable_unique(
++            self.related_work.warnings,
++            self.review_cost.warnings,
++        )
++        if self.warnings != expected_warnings:
++            raise ValueError(
++                "Warnings must equal stable related-work and review-cost warnings."
++            )
++        return self
++
++    @model_serializer(mode="wrap")
++    def serialize_result(
++        self,
++        _handler: Any,
++        info: Any,
++    ) -> dict[str, Any]:
++        """Serialize structured evidence without invocation credentials."""
++
++        mode = "json" if info.mode == "json" else "python"
++        serialized: dict[str, Any] = {
++            "repository": self.repository.model_dump(
++                mode=mode,
++                exclude_computed_fields=True,
++            ),
++            "pull_request": self.pull_request.model_dump(
++                mode=mode,
++                exclude_computed_fields=True,
++            ),
++            "pull_request_assessment": (
++                self.pull_request_assessment.model_dump(
++                    mode=mode,
++                    exclude_computed_fields=True,
++                )
++            ),
++            "related_work": self.related_work.model_dump(mode=mode),
++            "review_cost": self.review_cost.model_dump(
++                mode=mode,
++                exclude={
++                    "repository": {"full_name", "key"},
++                    "pull_request": {
++                        "repository": {"full_name", "key"},
++                        "key": True,
++                    },
++                },
++            ),
++            "warnings": list(self.warnings),
++        }
++        if not info.exclude_computed_fields:
++            serialized.update(
++                score=self.score,
++                level=self.level,
++                complete=self.complete,
++            )
++        return serialized
++
++    @computed_field
++    @property
++    def score(self) -> int:
++        return self.review_cost.score
++
++    @computed_field
++    @property
++    def level(self) -> ReviewCostLevel:
++        return self.review_cost.level
++
++    @computed_field
++    @property
++    def complete(self) -> bool:
++        return self.related_work.complete and self.review_cost.complete
++
++
++class PullRequestAssessor(Protocol):
++    async def assess(
++        self,
++        request: GitHubPullRequestAssessmentRequest,
++    ) -> GitHubPullRequestAssessmentResult:
++        ...
++
++
++class GitHubRelatedWorkFinder(Protocol):
++    async def find(
++        self,
++        request: GitHubRelatedWorkRequest,
++    ) -> GitHubRelatedWorkResult:
++        ...
++
++
++class ReviewCostAssessor(Protocol):
++    def assess(
++        self,
++        assessment_input: ReviewCostAssessmentInput,
++        *,
++        assessed_at: datetime,
++        options: ReviewCostAssessmentOptions | None = None,
++    ) -> ReviewCostAssessment:
++        ...
++
++
++class GitHubReviewCostRunner(Protocol):
++    async def assess(
++        self,
++        request: GitHubReviewCostRequest,
++    ) -> GitHubReviewCostResult:
++        ...
++
++
++def _assessment_request(
++    request: GitHubReviewCostRequest,
++) -> GitHubPullRequestAssessmentRequest:
++    return GitHubPullRequestAssessmentRequest(
++        installation_id=request.installation_id,
++        repository=request.repository,
++        pull_number=request.pull_number,
++        policy_path=request.policy_path,
++        explicit_categories=list(request.explicit_categories),
++        conversion_options=request.conversion_options,
++    )
++
++
++def _validate_assessment(
++    request: GitHubReviewCostRequest,
++    assessment: GitHubPullRequestAssessmentResult,
++) -> None:
++    if (
++        assessment.summary.repository != request.repository
++        or assessment.summary.pull_number != request.pull_number
++    ):
++        raise GitHubReviewCostError(
++            "Pull-request assessment identifies another repository or pull request."
++        )
++    if (
++        assessment.snapshot.repository != request.repository
++        or assessment.snapshot.pull_request.number != request.pull_number
++    ):
++        raise GitHubReviewCostError(
++            "Pull-request assessment snapshot identifies another pull request."
++        )
++
++
++def _related_query(
++    assessment: GitHubPullRequestAssessmentResult,
++) -> GitHubRelatedWorkQuery:
++    pull_request = assessment.snapshot.pull_request
++    text = pull_request.title
++    if pull_request.body:
++        text = f"{text}\n\n{pull_request.body}"
++    paths: list[str] = []
++    seen: set[str] = set()
++    for changed_file in assessment.snapshot.files:
++        for path in (changed_file.filename, changed_file.previous_filename):
++            if path is not None and path not in seen:
++                seen.add(path)
++                paths.append(path)
++    return GitHubRelatedWorkQuery(
++        text=text,
++        labels=list(pull_request.labels),
++        affected_paths=paths,
++        components=[],
++        item_types=[
++            KnowledgeItemType.ISSUE,
++            KnowledgeItemType.PULL_REQUEST,
++            KnowledgeItemType.ADR,
++        ],
++        states=[],
++    )
++
++
++def _validate_related_work(
++    result: GitHubRelatedWorkResult,
++    *,
++    repository: GitHubRepositoryRef,
++    query: KnowledgeLexicalQuery,
++    base_sha: str,
++) -> None:
++    if result.repository != repository:
++        raise GitHubReviewCostError(
++            "Related-work result belongs to another repository."
++        )
++    if result.related_work.query != query:
++        raise GitHubReviewCostError(
++            "Related-work result contains another derived query."
++        )
++    if result.snapshot.requested_ref != base_sha:
++        raise GitHubReviewCostError(
++            "Related-work result does not use the assessed pull request base SHA."
++        )
++
++
++def _change_type(status: str) -> ReviewCostChangeType:
++    try:
++        return ReviewCostChangeType(status.casefold())
++    except ValueError:
++        return ReviewCostChangeType.UNKNOWN
++
++
++def _merge_conflict(
++    assessment: GitHubPullRequestAssessmentResult,
++) -> bool | None:
++    pull_request = assessment.snapshot.pull_request
++    if pull_request.mergeable is not None:
++        return not pull_request.mergeable
++    state = (
++        pull_request.mergeable_state.casefold()
++        if pull_request.mergeable_state
++        else None
++    )
++    if state == "dirty":
++        return True
++    if state == "clean":
++        return False
++    return None
++
++
++def _historical_context(
++    related_work: GitHubRelatedWorkResult,
++) -> ReviewCostHistoricalContext:
++    matches = related_work.related_work.matches
++    return ReviewCostHistoricalContext(
++        related_match_count=related_work.related_work.returned_count,
++        rejected_or_superseded_count=sum(
++            match.item.state
++            in {KnowledgeItemState.REJECTED, KnowledgeItemState.SUPERSEDED}
++            for match in matches
++        ),
++        high_significance_count=sum(
++            match.item.decision_significance
++            in {DecisionSignificance.HIGH, DecisionSignificance.CRITICAL}
++            for match in matches
++        ),
++        unresolved_count=sum(
++            match.item.state
++            in {
++                KnowledgeItemState.OPEN,
++                KnowledgeItemState.DRAFT,
++                KnowledgeItemState.UNKNOWN,
++            }
++            for match in matches
++        ),
++        source_history_complete=related_work.source_history_complete,
++        ranking_coverage_complete=related_work.ranking_coverage_complete,
++        result_truncated=related_work.result_truncated,
++    )
++
++
++def _assessment_input(
++    assessment: GitHubPullRequestAssessmentResult,
++    related_work: GitHubRelatedWorkResult,
++) -> ReviewCostAssessmentInput:
++    snapshot = assessment.snapshot
++    pull_request = snapshot.pull_request
++    files = [
++        ReviewCostChangedFile(
++            path=file.filename,
++            previous_path=file.previous_filename,
++            change_type=_change_type(file.status),
++            additions=file.additions,
++            deletions=file.deletions,
++        )
++        for file in snapshot.files
++    ]
++    if len(files) != pull_request.changed_files_count:
++        raise GitHubReviewCostError(
++            "Review-cost input requires the complete pull-request file list."
++        )
++    policy_present = (
++        assessment.policy.policy_file_present
++        and assessment.policy.source != PolicySource.DEFAULT
++    )
++    all_paths = [
++        path
++        for file in files
++        for path in (file.path, file.previous_path)
++        if path is not None
++    ]
++    protected_paths: list[str] = []
++    if policy_present:
++        matched = {
++            match.path
++            for match in match_protected_paths(
++                all_paths,
++                assessment.repository_policy.protected_paths,
++            )
++        }
++        protected_paths = list(
++            dict.fromkeys(path for path in all_paths if path in matched)
++        )
++    knowledge_repository = knowledge_repository_from_github(snapshot.repository)
++    reference = KnowledgeItemReference(
++        repository=knowledge_repository,
++        item_type=KnowledgeItemType.PULL_REQUEST,
++        external_id=str(pull_request.number),
++        source_kind=KnowledgeSourceKind.GITHUB,
++        title=pull_request.title,
++        url=pull_request.html_url,
++    )
++
++    # The current policy schema does not define required check names.
++    return ReviewCostAssessmentInput(
++        repository=knowledge_repository,
++        pull_request=reference,
++        files=files,
++        commit_count=pull_request.commits_count,
++        preferred_diff_size=(
++            assessment.repository_policy.pull_requests.preferred_maximum_diff_lines
++            if policy_present
++            else DEFAULT_REVIEW_COST_PREFERRED_DIFF_SIZE
++        ),
++        policy_present=policy_present,
++        protected_changed_paths=protected_paths,
++        draft=pull_request.draft,
++        merge_conflict=_merge_conflict(assessment),
++        required_checks_total=0,
++        required_checks_passed=0,
++        required_checks_failed=0,
++        required_checks_pending=0,
++        approval_count=snapshot.human_approval_count,
++        changes_requested_count=snapshot.human_changes_requested_count,
++        historical_context=_historical_context(related_work),
++    )
++
++
++def _normalize_clock(clock_value: datetime) -> datetime:
++    if clock_value.tzinfo is None or clock_value.utcoffset() is None:
++        raise GitHubReviewCostError(
++            "Review-cost clock must return a timezone-aware datetime."
++        )
++    return clock_value.astimezone(UTC)
++
++
++def _default_clock() -> datetime:
++    return datetime.now(UTC)
++
++
++class GitHubReviewCostService:
++    """Orchestrate PR assessment, related work, and review-cost scoring."""
++
++    def __init__(
++        self,
++        *,
++        pull_request_assessor: PullRequestAssessor,
++        related_work_finder: GitHubRelatedWorkFinder,
++        review_cost_assessor: ReviewCostAssessor,
++        clock: Callable[[], datetime] | None = None,
++    ) -> None:
++        self._pull_request_assessor = pull_request_assessor
++        self._related_work_finder = related_work_finder
++        self._review_cost_assessor = review_cost_assessor
++        self._clock = clock or _default_clock
++
++    async def assess(
++        self,
++        request: GitHubReviewCostRequest,
++    ) -> GitHubReviewCostResult:
++        """Derive review cost from live read-only GitHub evidence."""
++
++        assessment = await self._pull_request_assessor.assess(
++            _assessment_request(request)
++        )
++        _validate_assessment(request, assessment)
++
++        query_input = _related_query(assessment)
++        knowledge_repository = knowledge_repository_from_github(request.repository)
++        query = query_input.to_knowledge_query(knowledge_repository)
++        base_sha = assessment.snapshot.pull_request.base.sha
++        related_request = GitHubRelatedWorkRequest(
++            installation_id=request.installation_id,
++            repository=request.repository,
++            git_ref=base_sha,
++            query=query_input,
++            snapshot_options=request.snapshot_options,
++            related_work_options=request.related_work_options,
++        )
++        related_work = await self._related_work_finder.find(related_request)
++        _validate_related_work(
++            related_work,
++            repository=request.repository,
++            query=query,
++            base_sha=base_sha,
++        )
++
++        assessment_input = _assessment_input(assessment, related_work)
++        assessed_at = _normalize_clock(self._clock())
++        review_cost = self._review_cost_assessor.assess(
++            assessment_input,
++            assessed_at=assessed_at,
++            options=request.review_cost_options,
++        )
++        if (
++            review_cost.repository != assessment_input.repository
++            or review_cost.pull_request != assessment_input.pull_request
++        ):
++            raise GitHubReviewCostError(
++                "Review-cost assessment identifies another repository or pull request."
++            )
++        pull_request = assessment.snapshot.pull_request
++        summary = GitHubReviewCostPullRequestSummary(
++            repository=request.repository,
++            pull_number=pull_request.number,
++            title=pull_request.title,
++            url=pull_request.html_url,
++            base_sha=pull_request.base.sha,
++            head_sha=pull_request.head.sha,
++            draft=pull_request.draft,
++            additions=pull_request.additions,
++            deletions=pull_request.deletions,
++            changed_files=len(assessment_input.files),
++            commits=pull_request.commits_count,
++            assessed_at=assessed_at,
++        )
++        warnings = _stable_unique(
++            related_work.warnings,
++            review_cost.warnings,
++        )
++        return GitHubReviewCostResult(
++            repository=request.repository,
++            pull_request=summary,
++            pull_request_assessment=assessment,
++            related_work=related_work,
++            review_cost=review_cost,
++            warnings=warnings,
++        )
+diff --git a/src/opensteward/github/runtime.py b/src/opensteward/github/runtime.py
+index 882fd7d..ccb326e 100644
+--- a/src/opensteward/github/runtime.py
++++ b/src/opensteward/github/runtime.py
+@@ -38,12 +38,18 @@ from opensteward.github.repositories import (
+ from opensteward.github.rest_client import (
+     GitHubRestClient,
+ )
++from opensteward.github.review_cost import (
++    GitHubReviewCostRequest,
++    GitHubReviewCostResult,
++    GitHubReviewCostService,
++)
+ from opensteward.github.settings import (
+     GitHubAppSettings,
+     GitHubConfigurationError,
+     get_github_settings,
+ )
+ from opensteward.knowledge import KnowledgeRelatedWorkService
++from opensteward.review_intelligence import ReviewCostAssessmentService
+ 
+ SettingsFactory = Callable[
+     [],
+@@ -217,3 +223,91 @@ class LiveGitHubRelatedWorkRunner:
+                 related_work_finder=related_work_finder,
+             )
+             return await related_work_service.find(request)
++
++
++class LiveGitHubReviewCostRunner:
++    """Build one shared live runtime for evidence-derived review cost."""
++
++    def __init__(
++        self,
++        *,
++        settings_factory: SettingsFactory = get_github_settings,
++    ) -> None:
++        self._settings_factory = settings_factory
++
++    async def assess(
++        self,
++        request: GitHubReviewCostRequest,
++    ) -> GitHubReviewCostResult:
++        """Run one read-only review-cost assessment."""
++
++        settings = self._settings_factory()
++        if not settings.configured:
++            raise GitHubConfigurationError(
++                "GitHub App authentication is not configured. "
++                "Set OPENSTEWARD_GITHUB_APP_ID and either "
++                "OPENSTEWARD_GITHUB_PRIVATE_KEY or "
++                "OPENSTEWARD_GITHUB_PRIVATE_KEY_PATH."
++            )
++        token_scope = GitHubInstallationTokenScope(
++            repositories=[request.repository.name],
++            permissions={
++                "contents": GitHubPermissionLevel.READ,
++                "pull_requests": GitHubPermissionLevel.READ,
++                "checks": GitHubPermissionLevel.READ,
++                "issues": GitHubPermissionLevel.READ,
++            },
++        )
++        async with httpx.AsyncClient(
++            follow_redirects=False,
++        ) as http_client:
++            token_provider = GitHubInstallationTokenProvider(
++                settings=settings,
++                client=http_client,
++            )
++            rest_client = GitHubRestClient(
++                settings=settings,
++                token_provider=token_provider,
++                client=http_client,
++                installation_id=request.installation_id,
++                token_scope=token_scope,
++            )
++
++            pull_request_service = GitHubPullRequestService(
++                rest_client=rest_client
++            )
++            repository_service = GitHubRepositoryService(
++                rest_client=rest_client
++            )
++            pull_request_assessor = GitHubPullRequestAssessmentService(
++                pull_request_loader=pull_request_service,
++                policy_loader=repository_service,
++            )
++
++            historical_collector = GitHubHistoricalKnowledgeCollector(
++                rest_client=rest_client
++            )
++            path_enricher = GitHubHistoricalPullRequestPathEnricher(
++                rest_client=rest_client
++            )
++            adr_collector = GitHubHistoricalAdrCollector(
++                rest_client=rest_client
++            )
++            snapshot_service = GitHubHistoricalKnowledgeSnapshotService(
++                historical_items_collector=historical_collector,
++                path_enricher=path_enricher,
++                adr_collector=adr_collector,
++            )
++            related_work_finder = KnowledgeRelatedWorkService()
++            related_work_service = GitHubRelatedWorkService(
++                snapshot_collector=snapshot_service,
++                related_work_finder=related_work_finder,
++            )
++
++            review_cost_assessor = ReviewCostAssessmentService()
++            review_cost_service = GitHubReviewCostService(
++                pull_request_assessor=pull_request_assessor,
++                related_work_finder=related_work_service,
++                review_cost_assessor=review_cost_assessor,
++            )
++            return await review_cost_service.assess(request)
+diff --git a/src/opensteward/mcp/github_capabilities.py b/src/opensteward/mcp/github_capabilities.py
+index ab4e3c2..b50eb86 100644
+--- a/src/opensteward/mcp/github_capabilities.py
++++ b/src/opensteward/mcp/github_capabilities.py
+@@ -11,14 +11,19 @@ from opensteward.github import (
+     GitHubRelatedWorkResult,
+     GitHubRelatedWorkRunner,
+     GitHubRepositoryRef,
++    GitHubReviewCostRequest,
++    GitHubReviewCostResult,
++    GitHubReviewCostRunner,
+     LiveGitHubPullRequestAssessmentRunner,
+     LiveGitHubRelatedWorkRunner,
++    LiveGitHubReviewCostRunner,
+ )
+ from opensteward.knowledge import KnowledgeRelatedWorkOptions
+ from opensteward.policy import (
+     DEFAULT_POLICY_FILENAME,
+     ContributionCategory,
+ )
++from opensteward.review_intelligence import ReviewCostAssessmentOptions
+ 
+ _assessment_runner: (
+     GitHubPullRequestAssessmentRunner
+@@ -26,6 +31,8 @@ _assessment_runner: (
+ 
+ _related_work_runner: GitHubRelatedWorkRunner = LiveGitHubRelatedWorkRunner()
+ 
++_review_cost_runner: GitHubReviewCostRunner = LiveGitHubReviewCostRunner()
++
+ 
+ async def assess_pull_request(
+     installation_id: int,
+@@ -106,3 +113,61 @@ async def find_related_work(
+         ),
+     )
+     return await _related_work_runner.find(request)
++
++
++async def assess_review_cost(
++    installation_id: int,
++    repository: GitHubRepositoryRef,
++    pull_number: int,
++    policy_path: str = DEFAULT_POLICY_FILENAME,
++    explicit_categories: list[ContributionCategory] | None = None,
++    conversion_options: GitHubContributionInputOptions | None = None,
++    snapshot_options: GitHubHistoricalKnowledgeSnapshotOptions | None = None,
++    related_work_options: KnowledgeRelatedWorkOptions | None = None,
++    review_cost_options: ReviewCostAssessmentOptions | None = None,
++) -> GitHubReviewCostResult:
++    """Estimate expected maintainer effort from live pull-request evidence.
++
++    The tool derives evidence from the live pull request, repository policy,
++    checks, reviews, changed paths, and related historical work. It returns
++    explainable structural, risk, validation, and historical drivers. Incomplete
++    source or ranking coverage is reported explicitly. Authentication uses a
++    GitHub App installation.
++
++    This tool is read-only. It does not comment, label, approve, reject, close,
++    merge, or modify repository content. It does not evaluate contributor skill
++    or trustworthiness.
++    """
++
++    request = GitHubReviewCostRequest(
++        installation_id=installation_id,
++        repository=repository,
++        pull_number=pull_number,
++        policy_path=policy_path,
++        explicit_categories=(
++            list(explicit_categories)
++            if explicit_categories is not None
++            else []
++        ),
++        conversion_options=(
++            conversion_options
++            if conversion_options is not None
++            else GitHubContributionInputOptions()
++        ),
++        snapshot_options=(
++            snapshot_options
++            if snapshot_options is not None
++            else GitHubHistoricalKnowledgeSnapshotOptions()
++        ),
++        related_work_options=(
++            related_work_options
++            if related_work_options is not None
++            else KnowledgeRelatedWorkOptions()
++        ),
++        review_cost_options=(
++            review_cost_options
++            if review_cost_options is not None
++            else ReviewCostAssessmentOptions()
++        ),
++    )
++    return await _review_cost_runner.assess(request)
+diff --git a/src/opensteward/mcp/server.py b/src/opensteward/mcp/server.py
+index 72f1585..e4034f5 100644
+--- a/src/opensteward/mcp/server.py
++++ b/src/opensteward/mcp/server.py
+@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP
+ from opensteward import __version__
+ from opensteward.mcp.github_capabilities import (
+     assess_pull_request,
++    assess_review_cost,
+     find_related_work,
+ )
+ from opensteward.mcp.policy_capabilities import (
+@@ -51,6 +52,7 @@ def estimate_review_cost(
+ mcp.tool()(evaluate_repository_policy)
+ mcp.tool()(assess_pull_request)
+ mcp.tool()(find_related_work)
++mcp.tool()(assess_review_cost)
+ mcp.resource(
+     "steward://repository/policy"
+ )(repository_policy_resource)
+diff --git a/src/opensteward/review_intelligence/__init__.py b/src/opensteward/review_intelligence/__init__.py
+new file mode 100644
+index 0000000..05b95bd
+--- /dev/null
++++ b/src/opensteward/review_intelligence/__init__.py
+@@ -0,0 +1,51 @@
++"""Explainable provider-independent review-cost intelligence."""
++
++from opensteward.review_intelligence.models import (
++    MAX_REVIEW_COST_BASIS_POINTS,
++    MAX_REVIEW_COST_CHANGED_FILES,
++    MAX_REVIEW_COST_EVIDENCE_ITEMS,
++    MAX_REVIEW_COST_PROTECTED_PATHS,
++    MAX_REVIEW_COST_SCORE,
++    MAX_REVIEW_COST_WARNINGS,
++    REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++    REVIEW_COST_CHANGE_SIZE_WEIGHT,
++    REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT,
++    REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT,
++    REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++    ReviewCostAssessment,
++    ReviewCostAssessmentInput,
++    ReviewCostAssessmentOptions,
++    ReviewCostChangedFile,
++    ReviewCostChangeType,
++    ReviewCostHistoricalContext,
++    ReviewCostLevel,
++    ReviewCostPathCategory,
++    ReviewCostSignal,
++    ReviewCostSignalContribution,
++)
++from opensteward.review_intelligence.scoring import ReviewCostAssessmentService
++
++__all__ = [
++    "MAX_REVIEW_COST_BASIS_POINTS",
++    "MAX_REVIEW_COST_CHANGED_FILES",
++    "MAX_REVIEW_COST_EVIDENCE_ITEMS",
++    "MAX_REVIEW_COST_PROTECTED_PATHS",
++    "MAX_REVIEW_COST_SCORE",
++    "MAX_REVIEW_COST_WARNINGS",
++    "REVIEW_COST_CHANGE_DISPERSION_WEIGHT",
++    "REVIEW_COST_CHANGE_SIZE_WEIGHT",
++    "REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT",
++    "REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT",
++    "REVIEW_COST_VALIDATION_GAPS_WEIGHT",
++    "ReviewCostAssessment",
++    "ReviewCostAssessmentInput",
++    "ReviewCostAssessmentOptions",
++    "ReviewCostAssessmentService",
++    "ReviewCostChangedFile",
++    "ReviewCostChangeType",
++    "ReviewCostHistoricalContext",
++    "ReviewCostLevel",
++    "ReviewCostPathCategory",
++    "ReviewCostSignal",
++    "ReviewCostSignalContribution",
++]
+diff --git a/src/opensteward/review_intelligence/models.py b/src/opensteward/review_intelligence/models.py
+new file mode 100644
+index 0000000..141d8e1
+--- /dev/null
++++ b/src/opensteward/review_intelligence/models.py
+@@ -0,0 +1,429 @@
++"""Provider-independent models for evidence-derived review-cost assessment."""
++
++import re
++from datetime import UTC, datetime
++from enum import StrEnum
++from pathlib import PurePosixPath
++from typing import Self
++
++from pydantic import (
++    ConfigDict,
++    Field,
++    computed_field,
++    field_validator,
++    model_validator,
++)
++
++from opensteward.knowledge import (
++    KnowledgeItemReference,
++    KnowledgeItemType,
++    KnowledgeRepositoryRef,
++    StrictKnowledgeModel,
++)
++
++MAX_REVIEW_COST_CHANGED_FILES = 3_000
++MAX_REVIEW_COST_PROTECTED_PATHS = 1_000
++MAX_REVIEW_COST_EVIDENCE_ITEMS = 100
++MAX_REVIEW_COST_WARNINGS = 100
++MAX_REVIEW_COST_SCORE = 100
++MAX_REVIEW_COST_BASIS_POINTS = 10_000
++
++REVIEW_COST_CHANGE_SIZE_WEIGHT = 25
++REVIEW_COST_CHANGE_DISPERSION_WEIGHT = 15
++REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT = 25
++REVIEW_COST_VALIDATION_GAPS_WEIGHT = 20
++REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT = 15
++
++
++class ReviewCostLevel(StrEnum):
++    """Expected maintainer review-effort level."""
++
++    LOW = "low"
++    MODERATE = "moderate"
++    HIGH = "high"
++    CRITICAL = "critical"
++
++
++class ReviewCostSignal(StrEnum):
++    """Signals contributing to evidence-derived review cost."""
++
++    CHANGE_SIZE = "change_size"
++    CHANGE_DISPERSION = "change_dispersion"
++    RISK_SENSITIVE_PATHS = "risk_sensitive_paths"
++    VALIDATION_GAPS = "validation_gaps"
++    HISTORICAL_COMPLEXITY = "historical_complexity"
++
++
++class ReviewCostChangeType(StrEnum):
++    """Normalized changed-file operation."""
++
++    ADDED = "added"
++    MODIFIED = "modified"
++    REMOVED = "removed"
++    RENAMED = "renamed"
++    COPIED = "copied"
++    UNKNOWN = "unknown"
++
++
++class ReviewCostPathCategory(StrEnum):
++    """Deterministic review-cost path categories."""
++
++    PROTECTED = "protected"
++    SECURITY_SENSITIVE = "security_sensitive"
++    DATABASE_MIGRATION = "database_migration"
++    AUTOMATION_OR_DEPLOYMENT = "automation_or_deployment"
++    DEPENDENCY_MANIFEST = "dependency_manifest"
++    TEST = "test"
++    DOCUMENTATION = "documentation"
++    PRODUCTION = "production"
++
++
++def normalize_review_cost_path(path: str) -> str:
++    """Normalize and validate one repository-relative path."""
++
++    normalized = path.replace("\\", "/").strip()
++    while normalized.startswith("./"):
++        normalized = normalized[2:]
++    if not normalized:
++        raise ValueError("Review-cost paths must not be empty.")
++    if normalized.startswith("/") or re.match(r"^[A-Za-z]:/", normalized):
++        raise ValueError("Review-cost paths must be repository-relative.")
++    parts = normalized.split("/")
++    if any(not part for part in parts):
++        raise ValueError("Review-cost paths must not contain empty segments.")
++    if any(part in {".", ".."} for part in parts):
++        raise ValueError("Review-cost paths must not contain '.' or '..' segments.")
++    return normalized
++
++
++def _validate_unique_text(values: list[str], field_name: str) -> list[str]:
++    if any(not value for value in values):
++        raise ValueError(f"{field_name} must contain non-empty strings.")
++    if len(values) != len(set(values)):
++        raise ValueError(f"{field_name} must contain unique strings.")
++    return values
++
++
++class ReviewCostChangedFile(StrictKnowledgeModel):
++    """One normalized file contributing to review structure and path risk."""
++
++    path: str
++    previous_path: str | None = None
++    change_type: ReviewCostChangeType
++    additions: int = Field(ge=0)
++    deletions: int = Field(ge=0)
++
++    @field_validator("path", "previous_path")
++    @classmethod
++    def normalize_paths(cls, value: str | None) -> str | None:
++        """Normalize current and previous repository paths."""
++
++        return None if value is None else normalize_review_cost_path(value)
++
++    @model_validator(mode="after")
++    def validate_previous_path(self) -> Self:
++        """Require a supplied previous path to identify another path."""
++
++        if self.previous_path == self.path:
++            raise ValueError("previous_path must differ from path.")
++        return self
++
++    @computed_field
++    @property
++    def changes(self) -> int:
++        """Return additions plus deletions."""
++
++        return self.additions + self.deletions
++
++    @computed_field
++    @property
++    def directory(self) -> str:
++        """Return the parent directory or root marker."""
++
++        parent = str(PurePosixPath(self.path).parent)
++        return parent if parent else "."
++
++    @computed_field
++    @property
++    def top_level_component(self) -> str:
++        """Return the first directory segment or root marker."""
++
++        parts = self.path.split("/")
++        return parts[0] if len(parts) > 1 else "(root)"
++
++
++class ReviewCostHistoricalContext(StrictKnowledgeModel):
++    """Classified related-work counts and coverage."""
++
++    related_match_count: int = Field(ge=0)
++    rejected_or_superseded_count: int = Field(ge=0)
++    high_significance_count: int = Field(ge=0)
++    unresolved_count: int = Field(ge=0)
++    source_history_complete: bool
++    ranking_coverage_complete: bool
++    result_truncated: bool
++
++    @model_validator(mode="after")
++    def validate_counts(self) -> Self:
++        """Ensure every classified count is bounded by returned matches."""
++
++        classified = (
++            self.rejected_or_superseded_count,
++            self.high_significance_count,
++            self.unresolved_count,
++        )
++        if any(count > self.related_match_count for count in classified):
++            raise ValueError(
++                "Historical classified counts must not exceed related_match_count."
++            )
++        return self
++
++
++class ReviewCostAssessmentInput(StrictKnowledgeModel):
++    """All provider-neutral evidence required for review-cost scoring."""
++
++    repository: KnowledgeRepositoryRef
++    pull_request: KnowledgeItemReference
++    files: list[ReviewCostChangedFile] = Field(
++        default_factory=list,
++        max_length=MAX_REVIEW_COST_CHANGED_FILES,
++    )
++    commit_count: int = Field(ge=0)
++    preferred_diff_size: int = Field(ge=1)
++    policy_present: bool
++    protected_changed_paths: list[str] = Field(
++        default_factory=list,
++        max_length=MAX_REVIEW_COST_PROTECTED_PATHS,
++    )
++    draft: bool
++    merge_conflict: bool | None
++    required_checks_total: int = Field(ge=0)
++    required_checks_passed: int = Field(ge=0)
++    required_checks_failed: int = Field(ge=0)
++    required_checks_pending: int = Field(ge=0)
++    approval_count: int = Field(ge=0)
++    changes_requested_count: int = Field(ge=0)
++    historical_context: ReviewCostHistoricalContext | None = None
++
++    @field_validator("protected_changed_paths")
++    @classmethod
++    def normalize_protected_paths(cls, paths: list[str]) -> list[str]:
++        """Normalize and require unique protected changed paths."""
++
++        normalized = [normalize_review_cost_path(path) for path in paths]
++        if len(normalized) != len(set(normalized)):
++            raise ValueError("Protected changed paths must be unique.")
++        return normalized
++
++    @model_validator(mode="after")
++    def validate_input(self) -> Self:
++        """Validate identity, path coverage, and check accounting."""
++
++        if self.pull_request.repository != self.repository:
++            raise ValueError("Pull-request reference must belong to repository.")
++        if self.pull_request.item_type != KnowledgeItemType.PULL_REQUEST:
++            raise ValueError("Review cost requires a pull-request reference.")
++        paths = [file.path for file in self.files]
++        if len(paths) != len(set(paths)):
++            raise ValueError("Review-cost changed file paths must be unique.")
++        available_paths = {
++            path
++            for file in self.files
++            for path in (file.path, file.previous_path)
++            if path is not None
++        }
++        if any(path not in available_paths for path in self.protected_changed_paths):
++            raise ValueError(
++                "Every protected changed path must identify a changed file path."
++            )
++        if (
++            self.required_checks_passed
++            + self.required_checks_failed
++            + self.required_checks_pending
++            != self.required_checks_total
++        ):
++            raise ValueError(
++                "Required check subcounts must sum to required_checks_total."
++            )
++        return self
++
++    @computed_field
++    @property
++    def additions(self) -> int:
++        return sum(file.additions for file in self.files)
++
++    @computed_field
++    @property
++    def deletions(self) -> int:
++        return sum(file.deletions for file in self.files)
++
++    @computed_field
++    @property
++    def total_changes(self) -> int:
++        return self.additions + self.deletions
++
++    @computed_field
++    @property
++    def changed_file_count(self) -> int:
++        return len(self.files)
++
++    @computed_field
++    @property
++    def distinct_directory_count(self) -> int:
++        return len({file.directory for file in self.files})
++
++    @computed_field
++    @property
++    def distinct_component_count(self) -> int:
++        return len({file.top_level_component for file in self.files})
++
++
++class ReviewCostAssessmentOptions(StrictKnowledgeModel):
++    """Bounds for explanatory review-cost evidence."""
++
++    max_evidence_items_per_signal: int = Field(
++        default=20,
++        ge=1,
++        le=MAX_REVIEW_COST_EVIDENCE_ITEMS,
++    )
++
++
++class ReviewCostSignalContribution(StrictKnowledgeModel):
++    """One explainable weighted review-cost signal."""
++
++    model_config = ConfigDict(json_schema_mode_override="serialization")
++
++    signal: ReviewCostSignal
++    signal_score: int = Field(ge=0, le=MAX_REVIEW_COST_SCORE)
++    weight_percent: int = Field(ge=1, le=100)
++    weighted_basis_points: int = Field(
++        ge=0,
++        le=MAX_REVIEW_COST_BASIS_POINTS,
++    )
++    explanation: str = Field(min_length=1)
++    evidence: list[str] = Field(
++        default_factory=list,
++        max_length=MAX_REVIEW_COST_EVIDENCE_ITEMS,
++    )
++
++    @field_validator("evidence")
++    @classmethod
++    def validate_evidence(cls, evidence: list[str]) -> list[str]:
++        return _validate_unique_text(evidence, "Review-cost evidence")
++
++    @model_validator(mode="after")
++    def validate_weighted_score(self) -> Self:
++        if self.weighted_basis_points != self.signal_score * self.weight_percent:
++            raise ValueError(
++                "weighted_basis_points must equal signal_score * weight_percent."
++            )
++        return self
++
++    @computed_field
++    @property
++    def weighted_score(self) -> float:
++        return self.weighted_basis_points / 100
++
++
++_SIGNAL_WEIGHTS = {
++    ReviewCostSignal.CHANGE_SIZE: REVIEW_COST_CHANGE_SIZE_WEIGHT,
++    ReviewCostSignal.CHANGE_DISPERSION: REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++    ReviewCostSignal.RISK_SENSITIVE_PATHS: (
++        REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT
++    ),
++    ReviewCostSignal.VALIDATION_GAPS: REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++    ReviewCostSignal.HISTORICAL_COMPLEXITY: (
++        REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT
++    ),
++}
++
++
++class ReviewCostAssessment(StrictKnowledgeModel):
++    """Complete explainable evidence-derived review-cost assessment."""
++
++    model_config = ConfigDict(json_schema_mode_override="serialization")
++
++    repository: KnowledgeRepositoryRef
++    pull_request: KnowledgeItemReference
++    assessed_at: datetime
++    contributions: list[ReviewCostSignalContribution]
++    reducers: list[str]
++    warnings: list[str] = Field(max_length=MAX_REVIEW_COST_WARNINGS)
++
++    @field_validator("assessed_at")
++    @classmethod
++    def normalize_assessed_at(cls, assessed_at: datetime) -> datetime:
++        if assessed_at.tzinfo is None or assessed_at.utcoffset() is None:
++            raise ValueError("assessed_at must be timezone-aware.")
++        return assessed_at.astimezone(UTC)
++
++    @field_validator("reducers")
++    @classmethod
++    def validate_reducers(cls, reducers: list[str]) -> list[str]:
++        return _validate_unique_text(reducers, "Review-cost reducers")
++
++    @field_validator("warnings")
++    @classmethod
++    def validate_warnings(cls, warnings: list[str]) -> list[str]:
++        return _validate_unique_text(warnings, "Review-cost warnings")
++
++    @model_validator(mode="after")
++    def validate_assessment(self) -> Self:
++        if self.pull_request.repository != self.repository:
++            raise ValueError("Pull-request reference must belong to repository.")
++        if self.pull_request.item_type != KnowledgeItemType.PULL_REQUEST:
++            raise ValueError("Review cost requires a pull-request reference.")
++        expected_signals = list(ReviewCostSignal)
++        signals = [contribution.signal for contribution in self.contributions]
++        if signals != expected_signals:
++            raise ValueError(
++                "Review-cost contributions must use the exact signal order."
++            )
++        for contribution in self.contributions:
++            if contribution.weight_percent != _SIGNAL_WEIGHTS[contribution.signal]:
++                raise ValueError("Review-cost contribution weights must be exact.")
++        if self.total_weighted_basis_points > MAX_REVIEW_COST_BASIS_POINTS:
++            raise ValueError("Total weighted basis points must not exceed 10,000.")
++        return self
++
++    @computed_field
++    @property
++    def total_weighted_basis_points(self) -> int:
++        return sum(
++            contribution.weighted_basis_points
++            for contribution in self.contributions
++        )
++
++    @computed_field
++    @property
++    def score(self) -> int:
++        return (self.total_weighted_basis_points + 50) // 100
++
++    @computed_field
++    @property
++    def level(self) -> ReviewCostLevel:
++        if self.score < 25:
++            return ReviewCostLevel.LOW
++        if self.score < 50:
++            return ReviewCostLevel.MODERATE
++        if self.score < 75:
++            return ReviewCostLevel.HIGH
++        return ReviewCostLevel.CRITICAL
++
++    @computed_field
++    @property
++    def primary_drivers(self) -> list[ReviewCostSignal]:
++        indexed = [
++            (index, contribution)
++            for index, contribution in enumerate(self.contributions)
++            if contribution.signal_score > 0
++        ]
++        indexed.sort(
++            key=lambda item: (-item[1].weighted_basis_points, item[0])
++        )
++        return [contribution.signal for _, contribution in indexed]
++
++    @computed_field
++    @property
++    def complete(self) -> bool:
++        return not self.warnings
+diff --git a/src/opensteward/review_intelligence/scoring.py b/src/opensteward/review_intelligence/scoring.py
+new file mode 100644
+index 0000000..36d8d47
+--- /dev/null
++++ b/src/opensteward/review_intelligence/scoring.py
+@@ -0,0 +1,507 @@
++"""Deterministic explainable review-cost scoring."""
++
++import re
++from datetime import UTC, datetime
++from pathlib import PurePosixPath
++
++from opensteward.review_intelligence.models import (
++    REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++    REVIEW_COST_CHANGE_SIZE_WEIGHT,
++    REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT,
++    REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT,
++    REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++    ReviewCostAssessment,
++    ReviewCostAssessmentInput,
++    ReviewCostAssessmentOptions,
++    ReviewCostPathCategory,
++    ReviewCostSignal,
++    ReviewCostSignalContribution,
++)
++
++_RISK_CATEGORY_ORDER = (
++    ReviewCostPathCategory.PROTECTED,
++    ReviewCostPathCategory.SECURITY_SENSITIVE,
++    ReviewCostPathCategory.DATABASE_MIGRATION,
++    ReviewCostPathCategory.AUTOMATION_OR_DEPLOYMENT,
++    ReviewCostPathCategory.DEPENDENCY_MANIFEST,
++)
++_RISK_BASE_SCORES = {
++    ReviewCostPathCategory.PROTECTED: 100,
++    ReviewCostPathCategory.SECURITY_SENSITIVE: 90,
++    ReviewCostPathCategory.DATABASE_MIGRATION: 85,
++    ReviewCostPathCategory.AUTOMATION_OR_DEPLOYMENT: 75,
++    ReviewCostPathCategory.DEPENDENCY_MANIFEST: 60,
++}
++_SECURITY_TOKENS = {
++    "auth",
++    "authentication",
++    "authorization",
++    "oauth",
++    "token",
++    "tokens",
++    "secret",
++    "secrets",
++    "permission",
++    "permissions",
++    "crypto",
++    "cryptography",
++    "security",
++    "access_control",
++}
++_DEPLOYMENT_SEGMENTS = {
++    "deploy",
++    "deployment",
++    "deployments",
++    "k8s",
++    "kubernetes",
++    "helm",
++    "terraform",
++    "infrastructure",
++}
++_DEPENDENCY_BASENAMES = {
++    "pyproject.toml",
++    "requirements.txt",
++    "uv.lock",
++    "package.json",
++    "package-lock.json",
++    "yarn.lock",
++    "pnpm-lock.yaml",
++    "pom.xml",
++    "build.gradle",
++    "build.gradle.kts",
++    "go.mod",
++    "go.sum",
++    "cargo.toml",
++    "cargo.lock",
++    "gemfile",
++    "gemfile.lock",
++    "composer.json",
++    "composer.lock",
++}
++_TEST_SEGMENTS = {"test", "tests", "spec", "specs", "__tests__"}
++_DOCUMENTATION_SEGMENTS = {"doc", "docs", "documentation"}
++_DOCUMENTATION_SUFFIXES = {".md", ".mdx", ".rst", ".adoc"}
++
++_MISSING_POLICY_WARNING = (
++    "Repository policy was unavailable; the default preferred diff size and "
++    "no protected paths were used."
++)
++_UNKNOWN_MERGE_WARNING = "Pull-request merge-conflict state was unavailable."
++_NO_HISTORY_WARNING = "Historical related-work context was unavailable."
++_INCOMPLETE_HISTORY_WARNING = "Historical source collection was incomplete."
++_INCOMPLETE_RANKING_WARNING = "Related-work ranking coverage was incomplete."
++_TRUNCATED_RELATED_WARNING = (
++    "Related-work results were truncated by the configured final result limit."
++)
++
++
++def _security_sensitive(path: str) -> bool:
++    parts = path.casefold().split("/")
++    candidates = set(parts)
++    basename = parts[-1]
++    stem = PurePosixPath(basename).stem
++    candidates.update({basename, stem})
++    for value in [*parts, stem]:
++        candidates.update(re.split(r"[_-]", value))
++    return bool(candidates & _SECURITY_TOKENS)
++
++
++def _database_migration(path: str) -> bool:
++    parts = path.casefold().split("/")
++    return (
++        any(part in {"migration", "migrations", "alembic"} for part in parts)
++        or any(parts[index : index + 2] == ["db", "migrate"] for index in range(len(parts)))
++        or any(
++            parts[index : index + 2] == ["database", "migrations"]
++            for index in range(len(parts))
++        )
++    )
++
++
++def _automation_or_deployment(path: str) -> bool:
++    folded = path.casefold()
++    parts = folded.split("/")
++    basename = parts[-1]
++    return (
++        parts[:2] == [".github", "workflows"]
++        or basename in {"dockerfile", "docker-compose.yml", "docker-compose.yaml"}
++        or any(part in _DEPLOYMENT_SEGMENTS for part in parts[:-1])
++    )
++
++
++def _dependency_manifest(path: str) -> bool:
++    basename = path.casefold().split("/")[-1]
++    return basename in _DEPENDENCY_BASENAMES or bool(
++        re.fullmatch(r"requirements-.+\.txt", basename)
++    )
++
++
++def _test_path(path: str) -> bool:
++    parts = path.casefold().split("/")
++    basename = parts[-1]
++    stem = PurePosixPath(basename).stem
++    return (
++        any(part in _TEST_SEGMENTS for part in parts[:-1])
++        or basename.startswith("test_")
++        or stem.endswith("_test")
++        or stem.endswith(".spec")
++        or stem.endswith(".test")
++    )
++
++
++def _documentation_path(path: str) -> bool:
++    folded = path.casefold()
++    parts = folded.split("/")
++    return (
++        any(part in _DOCUMENTATION_SEGMENTS for part in parts[:-1])
++        or PurePosixPath(folded).suffix in _DOCUMENTATION_SUFFIXES
++    )
++
++
++def _classify_path(
++    path: str,
++    protected_paths: set[str],
++) -> tuple[ReviewCostPathCategory, ...]:
++    categories: list[ReviewCostPathCategory] = []
++    if path in protected_paths:
++        categories.append(ReviewCostPathCategory.PROTECTED)
++    if _security_sensitive(path):
++        categories.append(ReviewCostPathCategory.SECURITY_SENSITIVE)
++    if _database_migration(path):
++        categories.append(ReviewCostPathCategory.DATABASE_MIGRATION)
++    if _automation_or_deployment(path):
++        categories.append(ReviewCostPathCategory.AUTOMATION_OR_DEPLOYMENT)
++    if _dependency_manifest(path):
++        categories.append(ReviewCostPathCategory.DEPENDENCY_MANIFEST)
++    is_test = _test_path(path)
++    is_documentation = _documentation_path(path)
++    if is_test:
++        categories.append(ReviewCostPathCategory.TEST)
++    if is_documentation:
++        categories.append(ReviewCostPathCategory.DOCUMENTATION)
++    if not is_test and not is_documentation:
++        categories.append(ReviewCostPathCategory.PRODUCTION)
++    return tuple(categories)
++
++
++def _band(value: int, bands: tuple[tuple[int, int], ...]) -> int:
++    if value == 0:
++        return 0
++    for maximum, score in bands:
++        if value <= maximum:
++            return score
++    return 100
++
++
++def _contribution(
++    signal: ReviewCostSignal,
++    score: int,
++    weight: int,
++    explanation: str,
++    evidence: list[str],
++    limit: int,
++) -> ReviewCostSignalContribution:
++    return ReviewCostSignalContribution(
++        signal=signal,
++        signal_score=score,
++        weight_percent=weight,
++        weighted_basis_points=score * weight,
++        explanation=explanation,
++        evidence=evidence[:limit],
++    )
++
++
++def _change_size(
++    assessment_input: ReviewCostAssessmentInput,
++    limit: int,
++) -> ReviewCostSignalContribution:
++    changes = assessment_input.total_changes
++    preferred = assessment_input.preferred_diff_size
++    if changes == 0:
++        line_score = 0
++    elif changes * 4 <= preferred:
++        line_score = 10
++    elif changes * 2 <= preferred:
++        line_score = 25
++    elif changes <= preferred:
++        line_score = 50
++    elif changes <= preferred * 2:
++        line_score = 75
++    else:
++        line_score = 100
++    file_score = _band(
++        assessment_input.changed_file_count,
++        ((3, 10), (10, 30), (25, 60), (50, 80)),
++    )
++    commit_score = _band(
++        assessment_input.commit_count,
++        ((2, 10), (5, 30), (10, 60), (20, 80)),
++    )
++    return _contribution(
++        ReviewCostSignal.CHANGE_SIZE,
++        max(line_score, file_score, commit_score),
++        REVIEW_COST_CHANGE_SIZE_WEIGHT,
++        "Change size combines changed lines, file count, and commit count.",
++        [
++            f"{changes} changed lines.",
++            f"{assessment_input.changed_file_count} changed files.",
++            f"{assessment_input.commit_count} commits.",
++            f"Preferred diff size is {preferred} lines.",
++        ],
++        limit,
++    )
++
++
++def _change_dispersion(
++    assessment_input: ReviewCostAssessmentInput,
++    limit: int,
++) -> ReviewCostSignalContribution:
++    component_score = _band(
++        assessment_input.distinct_component_count,
++        ((1, 10), (2, 30), (4, 60), (8, 80)),
++    )
++    directory_score = _band(
++        assessment_input.distinct_directory_count,
++        ((3, 10), (6, 30), (12, 60), (25, 80)),
++    )
++    return _contribution(
++        ReviewCostSignal.CHANGE_DISPERSION,
++        max(component_score, directory_score),
++        REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++        "Change dispersion reflects how widely the pull request spans repository areas.",
++        [
++            f"{assessment_input.distinct_component_count} top-level components.",
++            f"{assessment_input.distinct_directory_count} directories.",
++        ],
++        limit,
++    )
++
++
++def _risk_sensitive_paths(
++    classifications: dict[str, tuple[ReviewCostPathCategory, ...]],
++    limit: int,
++) -> ReviewCostSignalContribution:
++    counts = {
++        category: sum(category in categories for categories in classifications.values())
++        for category in _RISK_CATEGORY_ORDER
++    }
++    present = [category for category in _RISK_CATEGORY_ORDER if counts[category]]
++    score = (
++        min(100, max(_RISK_BASE_SCORES[category] for category in present) + 5 * (len(present) - 1))
++        if present
++        else 0
++    )
++    evidence = [
++        f"{counts[category]} changed paths classified as {category.value}."
++        for category in present
++    ]
++    for path in sorted(classifications):
++        for category in present:
++            if category in classifications[path]:
++                evidence.append(f"{category.value}: {path}")
++    return _contribution(
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++        score,
++        REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT,
++        "Risk-sensitive paths increase the need for specialized or cautious review.",
++        evidence,
++        limit,
++    )
++
++
++def _validation_gaps(
++    assessment_input: ReviewCostAssessmentInput,
++    classifications: dict[str, tuple[ReviewCostPathCategory, ...]],
++    limit: int,
++) -> tuple[ReviewCostSignalContribution, list[str]]:
++    production_count = sum(
++        ReviewCostPathCategory.PRODUCTION in categories
++        for categories in classifications.values()
++    )
++    test_count = sum(
++        ReviewCostPathCategory.TEST in categories
++        for categories in classifications.values()
++    )
++    gaps: list[tuple[int, str]] = []
++    if assessment_input.merge_conflict is True:
++        gaps.append((100, "A merge conflict is present."))
++    if assessment_input.required_checks_failed:
++        gaps.append(
++            (
++                90,
++                f"{assessment_input.required_checks_failed} required checks failed.",
++            )
++        )
++    if assessment_input.draft:
++        gaps.append((70, "The pull request is a draft."))
++    if assessment_input.required_checks_pending:
++        gaps.append(
++            (
++                60,
++                f"{assessment_input.required_checks_pending} required checks are pending.",
++            )
++        )
++    if assessment_input.changes_requested_count:
++        gaps.append(
++            (
++                60,
++                f"{assessment_input.changes_requested_count} active changes-requested reviews.",
++            )
++        )
++    if assessment_input.required_checks_total == 0 and production_count:
++        gaps.append((50, "Production changes have no configured required checks."))
++    if production_count and test_count == 0:
++        gaps.append((55, "Production changes have no accompanying test files."))
++
++    score = min(100, max((base for base, _ in gaps), default=0) + max(0, len(gaps) - 1) * 5)
++    reducers: list[str] = []
++    reduction_evidence: list[str] = []
++    if (
++        assessment_input.required_checks_total > 0
++        and assessment_input.required_checks_passed
++        == assessment_input.required_checks_total
++    ):
++        reducers.append("All required checks passed.")
++        reduction_evidence.append("Reduced 20 points because all required checks passed.")
++        score -= 20
++    if production_count and test_count:
++        reducers.append("Test changes accompany production changes.")
++        reduction_evidence.append(
++            "Reduced 15 points because test changes accompany production changes."
++        )
++        score -= 15
++    if (
++        assessment_input.approval_count > 0
++        and assessment_input.changes_requested_count == 0
++    ):
++        reducers.append(
++            "At least one approval is present without an active changes-requested review."
++        )
++        reduction_evidence.append(
++            "Reduced 10 points because an approval is present without changes requested."
++        )
++        score -= 10
++    contribution = _contribution(
++        ReviewCostSignal.VALIDATION_GAPS,
++        max(0, min(100, score)),
++        REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++        "Validation gaps estimate additional maintainer work before confident review.",
++        [text for _, text in gaps] + reduction_evidence,
++        limit,
++    )
++    return contribution, reducers
++
++
++def _historical_complexity(
++    assessment_input: ReviewCostAssessmentInput,
++    limit: int,
++) -> ReviewCostSignalContribution:
++    context = assessment_input.historical_context
++    if context is None:
++        score = 0
++        evidence: list[str] = []
++    else:
++        factors: list[int] = []
++        if context.rejected_or_superseded_count:
++            factors.append(80)
++        if context.high_significance_count:
++            factors.append(70)
++        if context.unresolved_count:
++            factors.append(50)
++        if context.related_match_count >= 10:
++            factors.append(50)
++        elif context.related_match_count >= 5:
++            factors.append(35)
++        elif context.related_match_count >= 1:
++            factors.append(15)
++        score = (
++            min(100, max(factors) + 5 * (len(factors) - 1))
++            if factors
++            else 0
++        )
++        evidence = [
++            f"{context.related_match_count} related historical matches.",
++            (
++                f"{context.rejected_or_superseded_count} rejected or "
++                "superseded matches."
++            ),
++            f"{context.high_significance_count} high-significance matches.",
++            f"{context.unresolved_count} unresolved matches.",
++        ]
++    return _contribution(
++        ReviewCostSignal.HISTORICAL_COMPLEXITY,
++        score,
++        REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT,
++        "Historical complexity reflects related rejected, important, or unresolved work.",
++        evidence,
++        limit,
++    )
++
++
++def _warnings(assessment_input: ReviewCostAssessmentInput) -> list[str]:
++    warnings: list[str] = []
++    if not assessment_input.policy_present:
++        warnings.append(_MISSING_POLICY_WARNING)
++    if assessment_input.merge_conflict is None:
++        warnings.append(_UNKNOWN_MERGE_WARNING)
++    context = assessment_input.historical_context
++    if context is None:
++        warnings.append(_NO_HISTORY_WARNING)
++    else:
++        if not context.source_history_complete:
++            warnings.append(_INCOMPLETE_HISTORY_WARNING)
++        if not context.ranking_coverage_complete:
++            warnings.append(_INCOMPLETE_RANKING_WARNING)
++        if context.result_truncated:
++            warnings.append(_TRUNCATED_RELATED_WARNING)
++    return list(dict.fromkeys(warnings))
++
++
++class ReviewCostAssessmentService:
++    """Calculate deterministic evidence-derived review cost."""
++
++    def assess(
++        self,
++        assessment_input: ReviewCostAssessmentInput,
++        *,
++        assessed_at: datetime,
++        options: ReviewCostAssessmentOptions | None = None,
++    ) -> ReviewCostAssessment:
++        """Analyze every source file and return five explainable signals."""
++
++        if assessed_at.tzinfo is None or assessed_at.utcoffset() is None:
++            raise ValueError("assessed_at must be timezone-aware.")
++        normalized_time = assessed_at.astimezone(UTC)
++        selected_options = options or ReviewCostAssessmentOptions()
++        protected = set(assessment_input.protected_changed_paths)
++        changed_paths = dict.fromkeys(
++            path
++            for file in assessment_input.files
++            for path in (file.path, file.previous_path)
++            if path is not None
++        )
++        classifications = {
++            path: _classify_path(path, protected)
++            for path in changed_paths
++        }
++        limit = selected_options.max_evidence_items_per_signal
++        validation, reducers = _validation_gaps(
++            assessment_input,
++            classifications,
++            limit,
++        )
++        contributions = [
++            _change_size(assessment_input, limit),
++            _change_dispersion(assessment_input, limit),
++            _risk_sensitive_paths(classifications, limit),
++            validation,
++            _historical_complexity(assessment_input, limit),
++        ]
++        return ReviewCostAssessment(
++            repository=assessment_input.repository,
++            pull_request=assessment_input.pull_request,
++            assessed_at=normalized_time,
++            contributions=contributions,
++            reducers=reducers,
++            warnings=_warnings(assessment_input),
++        )
+diff --git a/tests/github/test_review_cost.py b/tests/github/test_review_cost.py
+new file mode 100644
+index 0000000..13351de
+--- /dev/null
++++ b/tests/github/test_review_cost.py
+@@ -0,0 +1,728 @@
++"""Tests for GitHub evidence-derived review-cost orchestration."""
++
++from copy import deepcopy
++from datetime import UTC, datetime
++from typing import Any
++
++import pytest
++from pydantic import ValidationError
++
++from opensteward.github import (
++    GitHubApprovalCountSource,
++    GitHubChecksState,
++    GitHubChecksSummary,
++    GitHubContributionInputOptions,
++    GitHubContributionInputResult,
++    GitHubHistoricalKnowledgeSnapshotOptions,
++    GitHubIssueLinkageScope,
++    GitHubPullRequestActor,
++    GitHubPullRequestAssessmentPolicy,
++    GitHubPullRequestAssessmentRequest,
++    GitHubPullRequestAssessmentResult,
++    GitHubPullRequestAssessmentSummary,
++    GitHubPullRequestBranch,
++    GitHubPullRequestDetails,
++    GitHubPullRequestFile,
++    GitHubPullRequestReview,
++    GitHubPullRequestReviewState,
++    GitHubPullRequestSnapshot,
++    GitHubRelatedWorkQuery,
++    GitHubRelatedWorkRequest,
++    GitHubRelatedWorkResult,
++    GitHubRelatedWorkSnapshotSummary,
++    GitHubRepositoryRef,
++    GitHubReviewCostError,
++    GitHubReviewCostRequest,
++    GitHubReviewCostResult,
++    GitHubReviewCostService,
++    knowledge_repository_from_github,
++)
++from opensteward.knowledge import (
++    DecisionSignificance,
++    KnowledgeItem,
++    KnowledgeItemState,
++    KnowledgeItemType,
++    KnowledgeRelatedWorkOptions,
++    KnowledgeRelatedWorkService,
++    KnowledgeSourceKind,
++)
++from opensteward.policy import (
++    ContributionCategory,
++    ContributionPolicyInput,
++    MaintainerPolicyPacket,
++    MaintainerRecommendation,
++    PolicyEvaluationResult,
++    PolicySource,
++    ProtectedPathRule,
++    RepositoryPolicy,
++    RiskLevel,
++)
++from opensteward.review_intelligence import (
++    ReviewCostAssessment,
++    ReviewCostAssessmentInput,
++    ReviewCostAssessmentOptions,
++    ReviewCostAssessmentService,
++    ReviewCostChangeType,
++)
++
++REPOSITORY = GitHubRepositoryRef(owner="acme", name="framework")
++OTHER_REPOSITORY = GitHubRepositoryRef(owner="other", name="project")
++KNOWLEDGE_REPOSITORY = knowledge_repository_from_github(REPOSITORY)
++BASE_SHA = "a" * 40
++HEAD_SHA = "b" * 40
++ASSESSED_AT = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
++RELATED_AT = datetime(2026, 5, 31, 10, 0, tzinfo=UTC)
++
++
++def checks() -> GitHubChecksSummary:
++    return GitHubChecksSummary(
++        state=GitHubChecksState.SUCCESS,
++        total_count=1,
++        pending_count=0,
++        success_count=1,
++        failure_count=0,
++        neutral_count=0,
++        skipped_count=0,
++    )
++
++
++def assessment_result(
++    *,
++    mergeable: bool | None = False,
++    mergeable_state: str | None = "dirty",
++    policy_present: bool = True,
++) -> GitHubPullRequestAssessmentResult:
++    """Build a complete typed assessment exposing source evidence."""
++
++    actor = GitHubPullRequestActor(
++        id=1,
++        login="author",
++        account_type="User",
++    )
++    reviewer = GitHubPullRequestActor(
++        id=2,
++        login="reviewer",
++        account_type="User",
++    )
++    details = GitHubPullRequestDetails(
++        id=100,
++        number=17,
++        title="Refactor parser",
++        body="Moves authentication parsing into a registry.",
++        state="open",
++        draft=False,
++        merged=False,
++        mergeable=mergeable,
++        mergeable_state=mergeable_state,
++        html_url="https://github.com/acme/framework/pull/17",
++        labels=["architecture", "security"],
++        author=actor,
++        base=GitHubPullRequestBranch(
++            ref="main",
++            sha=BASE_SHA,
++            repository_full_name="acme/framework",
++        ),
++        head=GitHubPullRequestBranch(
++            ref="feature",
++            sha=HEAD_SHA,
++            repository_full_name="author/framework",
++        ),
++        additions=40,
++        deletions=5,
++        changed_files_count=2,
++        commits_count=4,
++        created_at=datetime(2026, 5, 1, tzinfo=UTC),
++        updated_at=datetime(2026, 5, 30, tzinfo=UTC),
++    )
++    files = [
++        GitHubPullRequestFile(
++            filename="src/security/auth.py",
++            previous_filename="src/legacy/auth.py",
++            status="RENAMED",
++            additions=30,
++            deletions=5,
++            changes=35,
++        ),
++        GitHubPullRequestFile(
++            filename="tests/test_auth.py",
++            status="modified",
++            additions=10,
++            deletions=0,
++            changes=10,
++        ),
++    ]
++    approval = GitHubPullRequestReview(
++        id=10,
++        reviewer=reviewer,
++        state=GitHubPullRequestReviewState.APPROVED,
++        submitted_at=datetime(2026, 5, 30, tzinfo=UTC),
++        commit_id=HEAD_SHA,
++        on_head_commit=True,
++    )
++    snapshot = GitHubPullRequestSnapshot(
++        repository=REPOSITORY,
++        pull_request=details,
++        files=files,
++        reviews=[approval],
++        effective_reviews=[approval],
++        check_runs=[],
++        checks=checks(),
++    )
++    policy = RepositoryPolicy(
++        protected_paths=[
++            ProtectedPathRule(
++                pattern="src/security/**",
++                risk=RiskLevel.CRITICAL,
++            )
++        ]
++    )
++    summary = GitHubPullRequestAssessmentSummary(
++        repository=REPOSITORY,
++        pull_number=17,
++        title=details.title,
++        html_url=details.html_url,
++        author_login="author",
++        state="open",
++        draft=False,
++        merged=False,
++        mergeable=mergeable,
++        mergeable_state=mergeable_state,
++        base_ref="main",
++        base_sha=BASE_SHA,
++        head_ref="feature",
++        head_sha=HEAD_SHA,
++        additions=40,
++        deletions=5,
++        diff_lines=45,
++        changed_files_reported=2,
++        files_collected=2,
++        files_complete=True,
++        review_history_count=1,
++        effective_review_count=1,
++        human_approval_count=1,
++        head_commit_human_approval_count=1,
++        human_changes_requested_count=0,
++        checks=checks(),
++    )
++    source = (
++        PolicySource.GITHUB_REPOSITORY
++        if policy_present
++        else PolicySource.DEFAULT
++    )
++    policy_summary = GitHubPullRequestAssessmentPolicy(
++        source=source,
++        source_reference="github:acme/framework@base:.opensteward.yml",
++        used_defaults=not policy_present,
++        policy_version=1,
++        trusted_ref=BASE_SHA,
++        requested_path=".opensteward.yml",
++        policy_file_present=policy_present,
++        policy_file_sha="policy-sha" if policy_present else None,
++        policy_file_html_url=(
++            "https://github.com/acme/framework/blob/base/.opensteward.yml"
++            if policy_present
++            else None
++        ),
++    )
++    conversion = GitHubContributionInputResult(
++        contribution=ContributionPolicyInput(
++            changed_files=[
++                "src/security/auth.py",
++                "src/legacy/auth.py",
++                "tests/test_auth.py",
++            ],
++            additions=40,
++            deletions=5,
++            categories=[ContributionCategory.ARCHITECTURE],
++            tests_changed=True,
++            current_approvals=1,
++        ),
++        affected_paths=[
++            "src/security/auth.py",
++            "src/legacy/auth.py",
++            "tests/test_auth.py",
++        ],
++        test_file_matches=["tests/test_auth.py"],
++        category_evidence=[],
++        linked_issue_evidence=[],
++        approval_source=GitHubApprovalCountSource.HEAD_COMMIT,
++        issue_linkage_scope=GitHubIssueLinkageScope.BODY_CLOSING_KEYWORDS_ONLY,
++        checks_state=GitHubChecksState.SUCCESS,
++        files_complete=True,
++        warnings=[],
++    )
++    evaluation = PolicyEvaluationResult(
++        compliant=True,
++        requires_human_review=True,
++        required_approvals=1,
++        current_approvals=1,
++        remaining_approvals=0,
++        highest_protected_path_risk=RiskLevel.CRITICAL,
++        findings=[],
++    )
++    packet = MaintainerPolicyPacket(
++        recommendation=MaintainerRecommendation.READY_FOR_REVIEW,
++        ready_for_detailed_review=True,
++        summary="Ready.",
++        approval_summary="Approval requirement met.",
++        blocking_requirements=[],
++        warnings=[],
++        suggested_next_actions=[],
++        passed_checks=0,
++        informational_checks=0,
++    )
++    return GitHubPullRequestAssessmentResult(
++        installation_id=41,
++        snapshot=snapshot,
++        repository_policy=policy,
++        summary=summary,
++        policy=policy_summary,
++        conversion=conversion,
++        packet=packet,
++        evaluation=evaluation,
++    )
++
++
++def expected_query(
++    assessment: GitHubPullRequestAssessmentResult,
++) -> GitHubRelatedWorkQuery:
++    details = assessment.snapshot.pull_request
++    return GitHubRelatedWorkQuery(
++        text=f"{details.title}\n\n{details.body}",
++        labels=["architecture", "security"],
++        affected_paths=[
++            "src/security/auth.py",
++            "src/legacy/auth.py",
++            "tests/test_auth.py",
++        ],
++        components=[],
++        item_types=[
++            KnowledgeItemType.ISSUE,
++            KnowledgeItemType.PULL_REQUEST,
++            KnowledgeItemType.ADR,
++        ],
++        states=[],
++    )
++
++
++async def related_result(
++    assessment: GitHubPullRequestAssessmentResult,
++    *,
++    warnings: list[str] | None = None,
++) -> GitHubRelatedWorkResult:
++    query = expected_query(assessment).to_knowledge_query(KNOWLEDGE_REPOSITORY)
++    item = KnowledgeItem(
++        repository=KNOWLEDGE_REPOSITORY,
++        item_type=KnowledgeItemType.ISSUE,
++        external_id="12",
++        source_kind=KnowledgeSourceKind.GITHUB,
++        state=KnowledgeItemState.REJECTED,
++        title="Authentication parser design",
++        body="Registry architecture was rejected.",
++        summary="Rejected parser design.",
++        url="https://github.com/acme/framework/issues/12",
++        created_at=datetime(2025, 1, 1, tzinfo=UTC),
++        updated_at=datetime(2025, 2, 1, tzinfo=UTC),
++        closed_at=datetime(2025, 2, 1, tzinfo=UTC),
++        labels=["architecture", "security"],
++        affected_paths=["src/security/auth.py"],
++        components=["security"],
++        decision_significance=DecisionSignificance.HIGH,
++    )
++    related = await KnowledgeRelatedWorkService().find(
++        query,
++        [item],
++        as_of=RELATED_AT,
++        options=KnowledgeRelatedWorkOptions(),
++    )
++    snapshot = GitHubRelatedWorkSnapshotSummary(
++        repository=REPOSITORY,
++        knowledge_repository=KNOWLEDGE_REPOSITORY,
++        requested_ref=BASE_SHA,
++        resolved_commit_sha=BASE_SHA,
++        adr_tree_sha="c" * 40,
++        collected_at=RELATED_AT,
++        adr_snapshot_commit_date=RELATED_AT,
++        complete=True,
++        total_count=1,
++        issue_count=1,
++        pull_request_count=0,
++        adr_count=0,
++        warnings=warnings or [],
++    )
++    return GitHubRelatedWorkResult(
++        repository=REPOSITORY,
++        snapshot=snapshot,
++        related_work=related,
++        warnings=warnings or [],
++    )
++
++
++def request(**updates: Any) -> GitHubReviewCostRequest:
++    payload: dict[str, Any] = {
++        "installation_id": 41,
++        "repository": REPOSITORY,
++        "pull_number": 17,
++    }
++    payload.update(updates)
++    return GitHubReviewCostRequest(**payload)
++
++
++class RecordingAssessor:
++    def __init__(self, outcome: object, events: list[str]) -> None:
++        self.outcome = outcome
++        self.events = events
++        self.calls: list[GitHubPullRequestAssessmentRequest] = []
++
++    async def assess(
++        self,
++        selected_request: GitHubPullRequestAssessmentRequest,
++    ) -> GitHubPullRequestAssessmentResult:
++        self.events.append("assessment")
++        self.calls.append(selected_request)
++        if isinstance(self.outcome, Exception):
++            raise self.outcome
++        assert isinstance(self.outcome, GitHubPullRequestAssessmentResult)
++        return self.outcome
++
++
++class RecordingFinder:
++    def __init__(self, outcome: object, events: list[str]) -> None:
++        self.outcome = outcome
++        self.events = events
++        self.calls: list[GitHubRelatedWorkRequest] = []
++
++    async def find(
++        self,
++        selected_request: GitHubRelatedWorkRequest,
++    ) -> GitHubRelatedWorkResult:
++        self.events.append("related")
++        self.calls.append(selected_request)
++        if isinstance(self.outcome, Exception):
++            raise self.outcome
++        assert isinstance(self.outcome, GitHubRelatedWorkResult)
++        return self.outcome
++
++
++class RecordingReviewCostAssessor:
++    def __init__(self, events: list[str]) -> None:
++        self.events = events
++        self.calls: list[
++            tuple[ReviewCostAssessmentInput, datetime, ReviewCostAssessmentOptions | None]
++        ] = []
++
++    def assess(
++        self,
++        assessment_input: ReviewCostAssessmentInput,
++        *,
++        assessed_at: datetime,
++        options: ReviewCostAssessmentOptions | None = None,
++    ) -> ReviewCostAssessment:
++        self.events.append("review-cost")
++        self.calls.append((assessment_input, assessed_at, options))
++        return ReviewCostAssessmentService().assess(
++            assessment_input,
++            assessed_at=assessed_at,
++            options=options,
++        )
++
++
++async def completed_review_cost_result() -> GitHubReviewCostResult:
++    """Build one fully validated result for cross-boundary serialization tests."""
++
++    events: list[str] = []
++    assessment = assessment_result()
++    related = await related_result(assessment)
++    return await GitHubReviewCostService(
++        pull_request_assessor=RecordingAssessor(assessment, events),
++        related_work_finder=RecordingFinder(related, events),
++        review_cost_assessor=RecordingReviewCostAssessor(events),
++        clock=lambda: ASSESSED_AT,
++    ).assess(request())
++
++
++class SentinelError(RuntimeError):
++    """Distinct dependency failure."""
++
++
++def test_request_defaults_bounds_and_explicit_options() -> None:
++    selected = request()
++    assert selected.policy_path == ".opensteward.yml"
++    assert selected.explicit_categories == []
++    assert selected.conversion_options == GitHubContributionInputOptions()
++    assert selected.snapshot_options == GitHubHistoricalKnowledgeSnapshotOptions()
++    assert selected.related_work_options == KnowledgeRelatedWorkOptions()
++    assert selected.review_cost_options == ReviewCostAssessmentOptions()
++
++    with pytest.raises(ValidationError):
++        request(installation_id=0)
++    with pytest.raises(ValidationError):
++        request(pull_number=0)
++
++    options = ReviewCostAssessmentOptions(max_evidence_items_per_signal=3)
++    explicit = request(
++        explicit_categories=[ContributionCategory.SECURITY],
++        review_cost_options=options,
++    )
++    assert explicit.explicit_categories == [ContributionCategory.SECURITY]
++    assert explicit.review_cost_options == options
++
++
++@pytest.mark.asyncio
++async def test_service_derives_all_evidence_in_exact_sequence_without_mutation() -> None:
++    events: list[str] = []
++    assessment = assessment_result()
++    related = await related_result(assessment, warnings=["history warning"])
++    assessor = RecordingAssessor(assessment, events)
++    finder = RecordingFinder(related, events)
++    domain = RecordingReviewCostAssessor(events)
++    selected_request = request(
++        explicit_categories=[ContributionCategory.ARCHITECTURE],
++        review_cost_options=ReviewCostAssessmentOptions(
++            max_evidence_items_per_signal=7
++        ),
++    )
++    before = (
++        deepcopy(selected_request.model_dump()),
++        deepcopy(assessment.model_dump()),
++        deepcopy(related.model_dump()),
++    )
++    clock_calls = 0
++
++    def clock() -> datetime:
++        nonlocal clock_calls
++        clock_calls += 1
++        events.append("clock")
++        return ASSESSED_AT
++
++    result = await GitHubReviewCostService(
++        pull_request_assessor=assessor,
++        related_work_finder=finder,
++        review_cost_assessor=domain,
++        clock=clock,
++    ).assess(selected_request)
++
++    assert events == ["assessment", "related", "clock", "review-cost"]
++    assert clock_calls == 1
++    assert len(assessor.calls) == len(finder.calls) == len(domain.calls) == 1
++    assessment_request = assessor.calls[0]
++    assert assessment_request.installation_id == selected_request.installation_id
++    assert assessment_request.repository == REPOSITORY
++    assert assessment_request.pull_number == 17
++    assert assessment_request.explicit_categories == [
++        ContributionCategory.ARCHITECTURE
++    ]
++
++    related_request = finder.calls[0]
++    assert related_request.git_ref == BASE_SHA
++    assert related_request.query == expected_query(assessment)
++    assert related_request.snapshot_options == selected_request.snapshot_options
++    assert related_request.related_work_options == selected_request.related_work_options
++
++    domain_input, assessed_at, domain_options = domain.calls[0]
++    assert [file.change_type for file in domain_input.files] == [
++        ReviewCostChangeType.RENAMED,
++        ReviewCostChangeType.MODIFIED,
++    ]
++    assert [(file.additions, file.deletions) for file in domain_input.files] == [
++        (30, 5),
++        (10, 0),
++    ]
++    assert domain_input.commit_count == 4
++    assert domain_input.preferred_diff_size == 500
++    assert domain_input.policy_present is True
++    assert domain_input.protected_changed_paths == ["src/security/auth.py"]
++    assert domain_input.draft is False
++    assert domain_input.merge_conflict is True
++    assert domain_input.required_checks_total == 0
++    assert domain_input.approval_count == 1
++    assert domain_input.changes_requested_count == 0
++    assert domain_input.historical_context is not None
++    assert domain_input.historical_context.related_match_count == 1
++    assert domain_input.historical_context.rejected_or_superseded_count == 1
++    assert domain_input.historical_context.high_significance_count == 1
++    assert assessed_at == ASSESSED_AT
++    assert domain_options is selected_request.review_cost_options
++
++    assert result.pull_request.base_sha == BASE_SHA
++    assert result.pull_request.head_sha == HEAD_SHA
++    assert result.pull_request.changed_files == 2
++    assert result.pull_request.commits == 4
++    assert result.review_cost is not None
++    assert result.warnings == ["history warning"]
++    assert selected_request.model_dump() == before[0]
++    assert assessment.model_dump() == before[1]
++    assert related.model_dump() == before[2]
++
++
++@pytest.mark.asyncio
++async def test_missing_policy_uses_safe_fallback_and_no_protected_paths() -> None:
++    events: list[str] = []
++    assessment = assessment_result(policy_present=False)
++    related = await related_result(assessment)
++    domain = RecordingReviewCostAssessor(events)
++    result = await GitHubReviewCostService(
++        pull_request_assessor=RecordingAssessor(assessment, events),
++        related_work_finder=RecordingFinder(related, events),
++        review_cost_assessor=domain,
++        clock=lambda: ASSESSED_AT,
++    ).assess(request())
++
++    adapted = domain.calls[0][0]
++    assert adapted.preferred_diff_size == 700
++    assert adapted.policy_present is False
++    assert adapted.protected_changed_paths == []
++    assert result.review_cost.warnings[0].startswith(
++        "Repository policy was unavailable"
++    )
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    ("mergeable", "state", "expected"),
++    [
++        (True, "clean", False),
++        (False, "dirty", True),
++        (None, "dirty", True),
++        (None, "clean", False),
++        (None, "unknown", None),
++    ],
++)
++async def test_mergeability_mapping(
++    mergeable: bool | None,
++    state: str,
++    expected: bool | None,
++) -> None:
++    events: list[str] = []
++    assessment = assessment_result(
++        mergeable=mergeable,
++        mergeable_state=state,
++    )
++    related = await related_result(assessment)
++    domain = RecordingReviewCostAssessor(events)
++    await GitHubReviewCostService(
++        pull_request_assessor=RecordingAssessor(assessment, events),
++        related_work_finder=RecordingFinder(related, events),
++        review_cost_assessor=domain,
++        clock=lambda: ASSESSED_AT,
++    ).assess(request())
++    assert domain.calls[0][0].merge_conflict is expected
++
++
++@pytest.mark.asyncio
++async def test_dependency_errors_propagate_and_stop_later_services() -> None:
++    events: list[str] = []
++    finder = RecordingFinder(SentinelError("must not run"), events)
++    domain = RecordingReviewCostAssessor(events)
++    with pytest.raises(SentinelError, match="assessment"):
++        await GitHubReviewCostService(
++            pull_request_assessor=RecordingAssessor(
++                SentinelError("assessment"),
++                events,
++            ),
++            related_work_finder=finder,
++            review_cost_assessor=domain,
++        ).assess(request())
++    assert finder.calls == []
++    assert domain.calls == []
++
++    assessment = assessment_result()
++    with pytest.raises(SentinelError, match="related"):
++        await GitHubReviewCostService(
++            pull_request_assessor=RecordingAssessor(assessment, events),
++            related_work_finder=RecordingFinder(
++                SentinelError("related"),
++                events,
++            ),
++            review_cost_assessor=domain,
++        ).assess(request())
++    assert domain.calls == []
++
++
++@pytest.mark.asyncio
++async def test_naive_clock_is_rejected_before_domain_assessor() -> None:
++    events: list[str] = []
++    assessment = assessment_result()
++    related = await related_result(assessment)
++    domain = RecordingReviewCostAssessor(events)
++    with pytest.raises(GitHubReviewCostError, match="timezone-aware"):
++        await GitHubReviewCostService(
++            pull_request_assessor=RecordingAssessor(assessment, events),
++            related_work_finder=RecordingFinder(related, events),
++            review_cost_assessor=domain,
++            clock=lambda: datetime(2026, 6, 1),
++        ).assess(request())
++    assert domain.calls == []
++
++
++@pytest.mark.asyncio
++async def test_consistency_errors_use_dedicated_type() -> None:
++    events: list[str] = []
++    assessment = assessment_result()
++    invalid_assessment = assessment.model_copy(
++        update={
++            "summary": assessment.summary.model_copy(
++                update={"repository": OTHER_REPOSITORY}
++            )
++        }
++    )
++    with pytest.raises(GitHubReviewCostError, match="another repository"):
++        await GitHubReviewCostService(
++            pull_request_assessor=RecordingAssessor(invalid_assessment, events),
++            related_work_finder=RecordingFinder(SentinelError(), events),
++            review_cost_assessor=RecordingReviewCostAssessor(events),
++        ).assess(request())
++
++    related = await related_result(assessment)
++    invalid_related = related.model_copy(
++        update={
++            "snapshot": related.snapshot.model_copy(
++                update={"requested_ref": "wrong"}
++            )
++        }
++    )
++    with pytest.raises(GitHubReviewCostError, match="base SHA"):
++        await GitHubReviewCostService(
++            pull_request_assessor=RecordingAssessor(assessment, events),
++            related_work_finder=RecordingFinder(invalid_related, events),
++            review_cost_assessor=RecordingReviewCostAssessor(events),
++        ).assess(request())
++
++
++@pytest.mark.asyncio
++async def test_result_serialization_is_concise_and_excludes_credentials() -> None:
++    events: list[str] = []
++    assessment = assessment_result()
++    related = await related_result(assessment)
++    result = await GitHubReviewCostService(
++        pull_request_assessor=RecordingAssessor(assessment, events),
++        related_work_finder=RecordingFinder(related, events),
++        review_cost_assessor=RecordingReviewCostAssessor(events),
++        clock=lambda: ASSESSED_AT,
++    ).assess(request())
++
++    data = result.model_dump(mode="json")
++
++    assert data["pull_request"]["pull_number"] == 17
++    assert data["review_cost"]["contributions"]
++    assert data["score"] == result.score
++    assert data["level"] == result.level.value
++    assert "installation_id" not in str(data)
++    assert "private_key" not in str(data)
++    assert "token_scope" not in str(data)
++    assert result.complete is True
++
++
++def test_assessment_contract_exposes_authoritative_review_cost_evidence() -> None:
++    result = assessment_result()
++
++    assert result.snapshot.pull_request.labels == [
++        "architecture",
++        "security",
++    ]
++    assert result.snapshot.pull_request.commits_count == 4
++    assert (
++        result.repository_policy.pull_requests.preferred_maximum_diff_lines
++        == 500
++    )
++    assert result.policy.policy_file_present is True
+diff --git a/tests/github/test_review_cost_runtime.py b/tests/github/test_review_cost_runtime.py
+new file mode 100644
+index 0000000..4eddeb3
+--- /dev/null
++++ b/tests/github/test_review_cost_runtime.py
+@@ -0,0 +1,265 @@
++"""Tests for live GitHub review-cost runtime wiring."""
++
++from typing import Any
++
++import pytest
++from pydantic import SecretStr
++
++import opensteward.github.runtime as runtime_module
++from opensteward.github import (
++    GitHubAppSettings,
++    GitHubConfigurationError,
++    GitHubPermissionLevel,
++    GitHubRepositoryRef,
++    GitHubReviewCostRequest,
++    LiveGitHubReviewCostRunner,
++)
++
++CONFIGURATION_MESSAGE = (
++    "GitHub App authentication is not configured. "
++    "Set OPENSTEWARD_GITHUB_APP_ID and either "
++    "OPENSTEWARD_GITHUB_PRIVATE_KEY or "
++    "OPENSTEWARD_GITHUB_PRIVATE_KEY_PATH."
++)
++
++
++def request() -> GitHubReviewCostRequest:
++    """Build one valid runtime request."""
++
++    return GitHubReviewCostRequest(
++        installation_id=29,
++        repository=GitHubRepositoryRef(owner="acme", name="framework"),
++        pull_number=17,
++    )
++
++
++def configured_settings() -> GitHubAppSettings:
++    """Build configured settings without reading the environment."""
++
++    return GitHubAppSettings.model_construct(
++        app_id=123,
++        private_key=SecretStr("configured-for-construction-only"),
++        private_key_path=None,
++        api_url="https://api.github.com",
++        api_version="2026-03-10",
++        user_agent="OpenSteward/0.1.0",
++        request_timeout_seconds=15.0,
++    )
++
++
++def unconfigured_settings() -> GitHubAppSettings:
++    """Build explicitly unconfigured settings without reading the environment."""
++
++    return GitHubAppSettings.model_construct(
++        app_id=None,
++        private_key=None,
++        private_key_path=None,
++        api_url="https://api.github.com",
++        api_version="2026-03-10",
++        user_agent="OpenSteward/0.1.0",
++        request_timeout_seconds=15.0,
++    )
++
++
++class FakeAsyncClient:
++    """Record HTTP-client construction and context closure."""
++
++    instances: list["FakeAsyncClient"] = []
++
++    def __init__(self, **kwargs: Any) -> None:
++        self.kwargs = kwargs
++        self.entered = False
++        self.closed = False
++        self.__class__.instances.append(self)
++
++    async def __aenter__(self) -> "FakeAsyncClient":
++        self.entered = True
++        return self
++
++    async def __aexit__(self, *args: object) -> None:
++        self.closed = True
++
++
++class FakeGitHubReviewCostService:
++    """Record final service construction and delegation."""
++
++    instances: list["FakeGitHubReviewCostService"] = []
++    outcome: object = object()
++    error: Exception | None = None
++
++    def __init__(self, **kwargs: Any) -> None:
++        self.kwargs = kwargs
++        self.calls: list[GitHubReviewCostRequest] = []
++        self.__class__.instances.append(self)
++
++    async def assess(self, selected_request: GitHubReviewCostRequest) -> object:
++        self.calls.append(selected_request)
++        if self.__class__.error is not None:
++            raise self.__class__.error
++        return self.__class__.outcome
++
++
++def install_runtime_doubles(
++    monkeypatch: pytest.MonkeyPatch,
++) -> tuple[dict[str, list[dict[str, Any]]], dict[str, object]]:
++    """Install recording constructors for the complete live dependency graph."""
++
++    names = (
++        "token",
++        "rest",
++        "pull_request",
++        "repository",
++        "assessment",
++        "historical",
++        "paths",
++        "adrs",
++        "snapshot",
++        "knowledge",
++        "related",
++        "review_cost",
++    )
++    records: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
++    FakeAsyncClient.instances = []
++    FakeGitHubReviewCostService.instances = []
++    FakeGitHubReviewCostService.outcome = object()
++    FakeGitHubReviewCostService.error = None
++    monkeypatch.setattr(runtime_module.httpx, "AsyncClient", FakeAsyncClient)
++
++    objects = {name: object() for name in names}
++
++    def constructor(name: str):
++        def construct(**kwargs: Any) -> object:
++            records[name].append(kwargs)
++            return objects[name]
++
++        return construct
++
++    constructors = {
++        "GitHubInstallationTokenProvider": "token",
++        "GitHubRestClient": "rest",
++        "GitHubPullRequestService": "pull_request",
++        "GitHubRepositoryService": "repository",
++        "GitHubPullRequestAssessmentService": "assessment",
++        "GitHubHistoricalKnowledgeCollector": "historical",
++        "GitHubHistoricalPullRequestPathEnricher": "paths",
++        "GitHubHistoricalAdrCollector": "adrs",
++        "GitHubHistoricalKnowledgeSnapshotService": "snapshot",
++        "KnowledgeRelatedWorkService": "knowledge",
++        "GitHubRelatedWorkService": "related",
++        "ReviewCostAssessmentService": "review_cost",
++    }
++    for attribute, name in constructors.items():
++        monkeypatch.setattr(runtime_module, attribute, constructor(name))
++    monkeypatch.setattr(
++        runtime_module,
++        "GitHubReviewCostService",
++        FakeGitHubReviewCostService,
++    )
++    return records, objects
++
++
++@pytest.mark.asyncio
++async def test_missing_configuration_uses_existing_error_and_builds_nothing(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    def forbidden_client(**kwargs: Any) -> object:
++        raise AssertionError(f"HTTP client must not be constructed: {kwargs}")
++
++    monkeypatch.setattr(runtime_module.httpx, "AsyncClient", forbidden_client)
++    runner = LiveGitHubReviewCostRunner(settings_factory=unconfigured_settings)
++
++    with pytest.raises(GitHubConfigurationError, match=CONFIGURATION_MESSAGE):
++        await runner.assess(request())
++
++
++@pytest.mark.asyncio
++async def test_runtime_builds_one_shared_read_only_graph_and_delegates_once(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    records, objects = install_runtime_doubles(monkeypatch)
++    selected_request = request()
++    runner = LiveGitHubReviewCostRunner(settings_factory=configured_settings)
++
++    result = await runner.assess(selected_request)
++
++    assert result is FakeGitHubReviewCostService.outcome
++    assert len(FakeAsyncClient.instances) == 1
++    http_client = FakeAsyncClient.instances[0]
++    assert http_client.kwargs == {"follow_redirects": False}
++    assert http_client.entered is True
++    assert http_client.closed is True
++
++    assert records["token"] == [
++        {"settings": configured_settings(), "client": http_client}
++    ]
++    rest_kwargs = records["rest"][0]
++    assert len(records["rest"]) == 1
++    assert rest_kwargs["settings"] == configured_settings()
++    assert rest_kwargs["token_provider"] is objects["token"]
++    assert rest_kwargs["client"] is http_client
++    assert rest_kwargs["installation_id"] == selected_request.installation_id
++    scope = rest_kwargs["token_scope"]
++    assert scope.repositories == [selected_request.repository.name]
++    assert scope.permissions == {
++        "contents": GitHubPermissionLevel.READ,
++        "pull_requests": GitHubPermissionLevel.READ,
++        "checks": GitHubPermissionLevel.READ,
++        "issues": GitHubPermissionLevel.READ,
++    }
++    assert all(
++        level != GitHubPermissionLevel.WRITE
++        for level in scope.permissions.values()
++    )
++
++    rest_client = objects["rest"]
++    for name in ("pull_request", "repository", "historical", "paths", "adrs"):
++        assert records[name] == [{"rest_client": rest_client}]
++    assert records["assessment"] == [
++        {
++            "pull_request_loader": objects["pull_request"],
++            "policy_loader": objects["repository"],
++        }
++    ]
++    assert records["snapshot"] == [
++        {
++            "historical_items_collector": objects["historical"],
++            "path_enricher": objects["paths"],
++            "adr_collector": objects["adrs"],
++        }
++    ]
++    assert records["knowledge"] == [{}]
++    assert records["related"] == [
++        {
++            "snapshot_collector": objects["snapshot"],
++            "related_work_finder": objects["knowledge"],
++        }
++    ]
++    assert records["review_cost"] == [{}]
++
++    final_service = FakeGitHubReviewCostService.instances[0]
++    assert len(FakeGitHubReviewCostService.instances) == 1
++    assert final_service.kwargs == {
++        "pull_request_assessor": objects["assessment"],
++        "related_work_finder": objects["related"],
++        "review_cost_assessor": objects["review_cost"],
++    }
++    assert final_service.calls == [selected_request]
++
++
++class SentinelRuntimeError(RuntimeError):
++    """Distinct final-service failure."""
++
++
++@pytest.mark.asyncio
++async def test_http_context_closes_when_delegated_service_fails(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    install_runtime_doubles(monkeypatch)
++    FakeGitHubReviewCostService.error = SentinelRuntimeError("failed")
++    runner = LiveGitHubReviewCostRunner(settings_factory=configured_settings)
++
++    with pytest.raises(SentinelRuntimeError, match="failed"):
++        await runner.assess(request())
++
++    assert len(FakeGitHubReviewCostService.instances[0].calls) == 1
++    assert FakeAsyncClient.instances[0].closed is True
+diff --git a/tests/review_intelligence/__init__.py b/tests/review_intelligence/__init__.py
+new file mode 100644
+index 0000000..3488706
+--- /dev/null
++++ b/tests/review_intelligence/__init__.py
+@@ -0,0 +1 @@
++"""Review-intelligence test package."""
+diff --git a/tests/review_intelligence/test_models.py b/tests/review_intelligence/test_models.py
+new file mode 100644
+index 0000000..50164fd
+--- /dev/null
++++ b/tests/review_intelligence/test_models.py
+@@ -0,0 +1,334 @@
++"""Tests for provider-independent review-intelligence models."""
++
++from datetime import UTC, datetime, timedelta, timezone
++from typing import Any
++
++import pytest
++from pydantic import ValidationError
++
++from opensteward.knowledge import (
++    KnowledgeItemReference,
++    KnowledgeItemType,
++    KnowledgeRepositoryRef,
++    KnowledgeSourceKind,
++)
++from opensteward.review_intelligence import (
++    REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++    REVIEW_COST_CHANGE_SIZE_WEIGHT,
++    REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT,
++    REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT,
++    REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++    ReviewCostAssessment,
++    ReviewCostAssessmentInput,
++    ReviewCostChangedFile,
++    ReviewCostChangeType,
++    ReviewCostHistoricalContext,
++    ReviewCostLevel,
++    ReviewCostSignal,
++    ReviewCostSignalContribution,
++)
++
++REPOSITORY = KnowledgeRepositoryRef(
++    provider="github",
++    namespace="acme",
++    name="framework",
++)
++PULL_REQUEST = KnowledgeItemReference(
++    repository=REPOSITORY,
++    item_type=KnowledgeItemType.PULL_REQUEST,
++    external_id="17",
++    source_kind=KnowledgeSourceKind.GITHUB,
++    title="Parser update",
++)
++ASSESSED_AT = datetime(2026, 6, 1, tzinfo=UTC)
++WEIGHTS = [
++    REVIEW_COST_CHANGE_SIZE_WEIGHT,
++    REVIEW_COST_CHANGE_DISPERSION_WEIGHT,
++    REVIEW_COST_RISK_SENSITIVE_PATHS_WEIGHT,
++    REVIEW_COST_VALIDATION_GAPS_WEIGHT,
++    REVIEW_COST_HISTORICAL_COMPLEXITY_WEIGHT,
++]
++
++
++def changed_file(path: str = "src/app.py", **updates: Any) -> ReviewCostChangedFile:
++    payload: dict[str, Any] = {
++        "path": path,
++        "change_type": ReviewCostChangeType.MODIFIED,
++        "additions": 10,
++        "deletions": 5,
++    }
++    payload.update(updates)
++    return ReviewCostChangedFile(**payload)
++
++
++def assessment_input(**updates: Any) -> ReviewCostAssessmentInput:
++    payload: dict[str, Any] = {
++        "repository": REPOSITORY,
++        "pull_request": PULL_REQUEST,
++        "files": [changed_file()],
++        "commit_count": 2,
++        "preferred_diff_size": 500,
++        "policy_present": True,
++        "protected_changed_paths": [],
++        "draft": False,
++        "merge_conflict": False,
++        "required_checks_total": 0,
++        "required_checks_passed": 0,
++        "required_checks_failed": 0,
++        "required_checks_pending": 0,
++        "approval_count": 0,
++        "changes_requested_count": 0,
++        "historical_context": ReviewCostHistoricalContext(
++            related_match_count=0,
++            rejected_or_superseded_count=0,
++            high_significance_count=0,
++            unresolved_count=0,
++            source_history_complete=True,
++            ranking_coverage_complete=True,
++            result_truncated=False,
++        ),
++    }
++    payload.update(updates)
++    return ReviewCostAssessmentInput(**payload)
++
++
++def contributions(score: int) -> list[ReviewCostSignalContribution]:
++    return [
++        ReviewCostSignalContribution(
++            signal=signal,
++            signal_score=score,
++            weight_percent=weight,
++            weighted_basis_points=score * weight,
++            explanation=f"{signal.value} explanation",
++            evidence=[f"{signal.value} evidence"],
++        )
++        for signal, weight in zip(ReviewCostSignal, WEIGHTS, strict=True)
++    ]
++
++
++def test_changed_file_normalizes_paths_and_computes_structure() -> None:
++    file = changed_file(
++        "./src\\parser\\registry.py",
++        previous_path="./old\\registry.py",
++    )
++
++    assert file.path == "src/parser/registry.py"
++    assert file.previous_path == "old/registry.py"
++    assert file.changes == 15
++    assert file.directory == "src/parser"
++    assert file.top_level_component == "src"
++    assert changed_file("README.md").directory == "."
++    assert changed_file("README.md").top_level_component == "(root)"
++
++
++@pytest.mark.parametrize(
++    "path",
++    ["", "/absolute.py", "C:\\absolute.py", "src//app.py", "src/../app.py"],
++)
++def test_changed_file_rejects_unsafe_paths(path: str) -> None:
++    with pytest.raises(ValidationError):
++        changed_file(path)
++    with pytest.raises(ValidationError):
++        changed_file("src/app.py", previous_path=path)
++
++
++def test_changed_file_previous_path_and_strictness() -> None:
++    with pytest.raises(ValidationError, match="must differ"):
++        changed_file("src/app.py", previous_path="./src/app.py")
++    with pytest.raises(ValidationError):
++        ReviewCostChangedFile(
++            path="src/app.py",
++            change_type="modified",
++            additions=1,
++            deletions=1,
++            extra=True,
++        )
++
++
++def test_historical_context_classified_counts_are_bounded() -> None:
++    with pytest.raises(ValidationError, match="must not exceed"):
++        ReviewCostHistoricalContext(
++            related_match_count=1,
++            rejected_or_superseded_count=2,
++            high_significance_count=0,
++            unresolved_count=0,
++            source_history_complete=True,
++            ranking_coverage_complete=True,
++            result_truncated=False,
++        )
++
++
++def test_assessment_input_validates_identity_files_paths_and_checks() -> None:
++    selected = assessment_input(
++        files=[
++            changed_file(
++                "src/new.py",
++                previous_path="src/old.py",
++            )
++        ],
++        protected_changed_paths=["./src\\old.py"],
++        required_checks_total=3,
++        required_checks_passed=1,
++        required_checks_failed=1,
++        required_checks_pending=1,
++    )
++    assert selected.protected_changed_paths == ["src/old.py"]
++    assert selected.additions == 10
++    assert selected.deletions == 5
++    assert selected.total_changes == 15
++    assert selected.changed_file_count == 1
++    assert selected.distinct_directory_count == 1
++    assert selected.distinct_component_count == 1
++
++    other_repository = REPOSITORY.model_copy(update={"name": "other"})
++    with pytest.raises(ValidationError, match="belong"):
++        assessment_input(
++            pull_request=PULL_REQUEST.model_copy(
++                update={"repository": other_repository}
++            )
++        )
++    with pytest.raises(ValidationError, match="pull-request"):
++        assessment_input(
++            pull_request=PULL_REQUEST.model_copy(
++                update={"item_type": KnowledgeItemType.ISSUE}
++            )
++        )
++    with pytest.raises(ValidationError, match="unique"):
++        assessment_input(files=[changed_file(), changed_file()])
++    with pytest.raises(ValidationError, match="identify"):
++        assessment_input(protected_changed_paths=["other.py"])
++    with pytest.raises(ValidationError, match="sum"):
++        assessment_input(
++            required_checks_total=2,
++            required_checks_passed=1,
++        )
++
++
++def test_contribution_validates_basis_points_evidence_and_bounds() -> None:
++    contribution = contributions(25)[0]
++    assert contribution.weighted_score == 6.25
++
++    payload = contribution.model_dump(exclude_computed_fields=True)
++    with pytest.raises(ValidationError, match="must equal"):
++        ReviewCostSignalContribution(
++            **(payload | {"weighted_basis_points": 1})
++        )
++    for evidence in ([""], ["same", "same"]):
++        with pytest.raises(ValidationError):
++            ReviewCostSignalContribution(**(payload | {"evidence": evidence}))
++
++
++@pytest.mark.parametrize(
++    ("score", "level"),
++    [
++        (24, ReviewCostLevel.LOW),
++        (25, ReviewCostLevel.MODERATE),
++        (49, ReviewCostLevel.MODERATE),
++        (50, ReviewCostLevel.HIGH),
++        (74, ReviewCostLevel.HIGH),
++        (75, ReviewCostLevel.CRITICAL),
++    ],
++)
++def test_assessment_score_level_boundaries(score: int, level: ReviewCostLevel) -> None:
++    assessment = ReviewCostAssessment(
++        repository=REPOSITORY,
++        pull_request=PULL_REQUEST,
++        assessed_at=ASSESSED_AT,
++        contributions=contributions(score),
++        reducers=[],
++        warnings=[],
++    )
++    assert assessment.total_weighted_basis_points == score * 100
++    assert assessment.score == score
++    assert assessment.level == level
++
++
++def test_assessment_validates_order_weights_time_and_text_lists() -> None:
++    non_utc = datetime(
++        2026,
++        6,
++        1,
++        6,
++        tzinfo=timezone(timedelta(hours=6)),
++    )
++    assessment = ReviewCostAssessment(
++        repository=REPOSITORY,
++        pull_request=PULL_REQUEST,
++        assessed_at=non_utc,
++        contributions=contributions(10),
++        reducers=["All checks passed."],
++        warnings=[],
++    )
++    assert assessment.assessed_at == ASSESSED_AT
++    assert assessment.assessed_at.tzinfo is UTC
++
++    with pytest.raises(ValidationError, match="exact signal order"):
++        ReviewCostAssessment(
++            repository=REPOSITORY,
++            pull_request=PULL_REQUEST,
++            assessed_at=ASSESSED_AT,
++            contributions=list(reversed(contributions(10))),
++            reducers=[],
++            warnings=[],
++        )
++    invalid_weight = contributions(10)
++    invalid_weight[0] = invalid_weight[0].model_copy(
++        update={"weight_percent": 24, "weighted_basis_points": 240}
++    )
++    with pytest.raises(ValidationError, match="weights"):
++        ReviewCostAssessment(
++            repository=REPOSITORY,
++            pull_request=PULL_REQUEST,
++            assessed_at=ASSESSED_AT,
++            contributions=invalid_weight,
++            reducers=[],
++            warnings=[],
++        )
++    for field_name in ("reducers", "warnings"):
++        with pytest.raises(ValidationError):
++            ReviewCostAssessment(
++                repository=REPOSITORY,
++                pull_request=PULL_REQUEST,
++                assessed_at=ASSESSED_AT,
++                contributions=contributions(10),
++                reducers=["same", "same"] if field_name == "reducers" else [],
++                warnings=["same", "same"] if field_name == "warnings" else [],
++            )
++
++
++def test_primary_drivers_completeness_and_json_serialization() -> None:
++    selected = contributions(0)
++    selected[0] = ReviewCostSignalContribution(
++        signal=ReviewCostSignal.CHANGE_SIZE,
++        signal_score=40,
++        weight_percent=25,
++        weighted_basis_points=1000,
++        explanation="size",
++        evidence=[],
++    )
++    selected[2] = ReviewCostSignalContribution(
++        signal=ReviewCostSignal.RISK_SENSITIVE_PATHS,
++        signal_score=40,
++        weight_percent=25,
++        weighted_basis_points=1000,
++        explanation="risk",
++        evidence=[],
++    )
++    assessment = ReviewCostAssessment(
++        repository=REPOSITORY,
++        pull_request=PULL_REQUEST,
++        assessed_at=ASSESSED_AT,
++        contributions=selected,
++        reducers=[],
++        warnings=[],
++    )
++    assert assessment.primary_drivers == [
++        ReviewCostSignal.CHANGE_SIZE,
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    ]
++    assert assessment.complete is True
++    data = assessment.model_dump(mode="json")
++    assert data["level"] == "low"
++    assert data["primary_drivers"] == ["change_size", "risk_sensitive_paths"]
++    incomplete = assessment.model_copy(update={"warnings": ["incomplete"]})
++    assert incomplete.complete is False
+diff --git a/tests/review_intelligence/test_scoring.py b/tests/review_intelligence/test_scoring.py
+new file mode 100644
+index 0000000..745e59f
+--- /dev/null
++++ b/tests/review_intelligence/test_scoring.py
+@@ -0,0 +1,513 @@
++"""Boundary tests for deterministic review-cost scoring."""
++
++from copy import deepcopy
++from datetime import UTC, datetime
++from typing import Any
++
++import pytest
++
++from opensteward.knowledge import (
++    KnowledgeItemReference,
++    KnowledgeItemType,
++    KnowledgeRepositoryRef,
++    KnowledgeSourceKind,
++)
++from opensteward.review_intelligence import (
++    ReviewCostAssessmentInput,
++    ReviewCostAssessmentOptions,
++    ReviewCostAssessmentService,
++    ReviewCostChangedFile,
++    ReviewCostChangeType,
++    ReviewCostHistoricalContext,
++    ReviewCostSignal,
++)
++
++REPOSITORY = KnowledgeRepositoryRef(
++    provider="github",
++    namespace="acme",
++    name="framework",
++)
++PULL_REQUEST = KnowledgeItemReference(
++    repository=REPOSITORY,
++    item_type=KnowledgeItemType.PULL_REQUEST,
++    external_id="17",
++    source_kind=KnowledgeSourceKind.GITHUB,
++)
++ASSESSED_AT = datetime(2026, 6, 1, tzinfo=UTC)
++
++
++def file(
++    path: str,
++    *,
++    changes: int = 1,
++) -> ReviewCostChangedFile:
++    return ReviewCostChangedFile(
++        path=path,
++        change_type=ReviewCostChangeType.MODIFIED,
++        additions=changes,
++        deletions=0,
++    )
++
++
++def input_model(**updates: Any) -> ReviewCostAssessmentInput:
++    payload: dict[str, Any] = {
++        "repository": REPOSITORY,
++        "pull_request": PULL_REQUEST,
++        "files": [],
++        "commit_count": 0,
++        "preferred_diff_size": 100,
++        "policy_present": True,
++        "protected_changed_paths": [],
++        "draft": False,
++        "merge_conflict": False,
++        "required_checks_total": 0,
++        "required_checks_passed": 0,
++        "required_checks_failed": 0,
++        "required_checks_pending": 0,
++        "approval_count": 0,
++        "changes_requested_count": 0,
++        "historical_context": ReviewCostHistoricalContext(
++            related_match_count=0,
++            rejected_or_superseded_count=0,
++            high_significance_count=0,
++            unresolved_count=0,
++            source_history_complete=True,
++            ranking_coverage_complete=True,
++            result_truncated=False,
++        ),
++    }
++    payload.update(updates)
++    return ReviewCostAssessmentInput(**payload)
++
++
++def score(
++    selected_input: ReviewCostAssessmentInput,
++    signal: ReviewCostSignal,
++    *,
++    evidence_limit: int = 20,
++) -> tuple[int, list[str], list[str]]:
++    result = ReviewCostAssessmentService().assess(
++        selected_input,
++        assessed_at=ASSESSED_AT,
++        options=ReviewCostAssessmentOptions(
++            max_evidence_items_per_signal=evidence_limit
++        ),
++    )
++    contribution = next(
++        item for item in result.contributions if item.signal == signal
++    )
++    return contribution.signal_score, contribution.evidence, result.reducers
++
++
++@pytest.mark.parametrize(
++    ("changes", "expected"),
++    [(0, 0), (25, 10), (50, 25), (100, 50), (200, 75), (201, 100)],
++)
++def test_change_line_boundaries(changes: int, expected: int) -> None:
++    files = [] if changes == 0 else [file("docs/readme.md", changes=changes)]
++    actual, evidence, _ = score(
++        input_model(files=files),
++        ReviewCostSignal.CHANGE_SIZE,
++    )
++    assert actual == expected
++    assert evidence[0] == f"{changes} changed lines."
++
++
++@pytest.mark.parametrize(
++    ("count", "expected"),
++    [
++        (0, 0),
++        (1, 10),
++        (3, 10),
++        (4, 30),
++        (10, 30),
++        (11, 60),
++        (25, 60),
++        (26, 80),
++        (50, 80),
++        (51, 100),
++    ],
++)
++def test_changed_file_boundaries(count: int, expected: int) -> None:
++    actual, _, _ = score(
++        input_model(
++            files=[file(f"docs/file-{index}.md", changes=0) for index in range(count)]
++        ),
++        ReviewCostSignal.CHANGE_SIZE,
++    )
++    assert actual == expected
++
++
++@pytest.mark.parametrize(
++    ("count", "expected"),
++    [(0, 0), (1, 10), (2, 10), (3, 30), (5, 30), (6, 60), (10, 60), (11, 80), (20, 80), (21, 100)],
++)
++def test_commit_boundaries(count: int, expected: int) -> None:
++    actual, _, _ = score(
++        input_model(commit_count=count),
++        ReviewCostSignal.CHANGE_SIZE,
++    )
++    assert actual == expected
++
++
++def test_change_size_uses_maximum_subscore() -> None:
++    actual, _, _ = score(
++        input_model(files=[file("docs/a.md", changes=1)], commit_count=21),
++        ReviewCostSignal.CHANGE_SIZE,
++    )
++    assert actual == 100
++
++
++@pytest.mark.parametrize(
++    ("components", "expected"),
++    [(0, 0), (1, 10), (2, 30), (3, 60), (4, 60), (5, 80), (8, 80), (9, 100)],
++)
++def test_component_dispersion_boundaries(components: int, expected: int) -> None:
++    files = [
++        file(f"component-{index}/file.md", changes=0)
++        for index in range(components)
++    ]
++    actual, _, _ = score(
++        input_model(files=files),
++        ReviewCostSignal.CHANGE_DISPERSION,
++    )
++    assert actual == expected
++
++
++@pytest.mark.parametrize(
++    ("directories", "expected"),
++    [(0, 0), (1, 10), (3, 10), (4, 30), (6, 30), (7, 60), (12, 60), (13, 80), (25, 80), (26, 100)],
++)
++def test_directory_dispersion_boundaries(directories: int, expected: int) -> None:
++    files = [
++        file(f"root/dir-{index}/file.md", changes=0)
++        for index in range(directories)
++    ]
++    actual, evidence, _ = score(
++        input_model(files=files),
++        ReviewCostSignal.CHANGE_DISPERSION,
++    )
++    assert actual == expected
++    assert evidence[-1] == f"{directories} directories."
++
++
++def test_root_file_dispersion_and_maximum_subscore() -> None:
++    actual, evidence, _ = score(
++        input_model(
++            files=[
++                file("README.md", changes=0),
++                file("a/file.md", changes=0),
++                file("b/file.md", changes=0),
++            ]
++        ),
++        ReviewCostSignal.CHANGE_DISPERSION,
++    )
++    assert actual == 60
++    assert evidence == ["3 top-level components.", "3 directories."]
++
++
++@pytest.mark.parametrize(
++    "token",
++    [
++        "auth",
++        "authentication",
++        "authorization",
++        "oauth",
++        "token",
++        "tokens",
++        "secret",
++        "secrets",
++        "permission",
++        "permissions",
++        "crypto",
++        "cryptography",
++        "security",
++        "access_control",
++    ],
++)
++def test_every_security_token_is_classified(token: str) -> None:
++    actual, evidence, _ = score(
++        input_model(files=[file(f"src/{token}/service.py")]),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == 90
++    assert "security_sensitive" in " ".join(evidence)
++
++
++@pytest.mark.parametrize("stem", ["token_store.py", "secret-store.py"])
++def test_security_stem_splitting(stem: str) -> None:
++    actual, _, _ = score(
++        input_model(files=[file(f"src/{stem}")]),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == 90
++
++
++def test_security_does_not_use_unrestricted_substrings() -> None:
++    actual, evidence, _ = score(
++        input_model(files=[file("documentation/authors.md")]),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == 0
++    assert evidence == []
++
++
++@pytest.mark.parametrize(
++    ("path", "category", "base"),
++    [
++        ("db/migrate/001.sql", "database_migration", 85),
++        ("database/migrations/001.sql", "database_migration", 85),
++        ("alembic/versions/001.py", "database_migration", 85),
++        (".github/workflows/ci.yml", "automation_or_deployment", 75),
++        ("Dockerfile", "automation_or_deployment", 75),
++        ("terraform/main.tf", "automation_or_deployment", 75),
++        ("pyproject.toml", "dependency_manifest", 60),
++        ("requirements-dev.txt", "dependency_manifest", 60),
++    ],
++)
++def test_risk_category_patterns(path: str, category: str, base: int) -> None:
++    actual, evidence, _ = score(
++        input_model(files=[file(path)]),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == base
++    assert category in " ".join(evidence)
++
++
++@pytest.mark.parametrize(
++    "path",
++    ["tests/app.py", "src/test_app.py", "src/app_test.py", "src/app.spec.ts", "src/app.test.ts"],
++)
++def test_test_paths_are_not_direct_risk(path: str) -> None:
++    actual, _, _ = score(
++        input_model(files=[file(path)]),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == 0
++
++
++@pytest.mark.parametrize("path", ["docs/guide.py", "README.md", "guide.rst"])
++def test_documentation_paths_are_not_production_or_direct_risk(path: str) -> None:
++    selected = input_model(files=[file(path)])
++    risk, _, _ = score(selected, ReviewCostSignal.RISK_SENSITIVE_PATHS)
++    validation, _, _ = score(selected, ReviewCostSignal.VALIDATION_GAPS)
++    assert risk == 0
++    assert validation == 0
++
++
++def test_protected_and_multiple_risk_categories_increment_and_cap() -> None:
++    selected = input_model(
++        files=[
++            file("security/migrations/pyproject.toml"),
++            file(".github/workflows/deploy.yml"),
++        ],
++        protected_changed_paths=["security/migrations/pyproject.toml"],
++    )
++    actual, evidence, _ = score(
++        selected,
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    assert actual == 100
++    assert evidence[:5] == [
++        "1 changed paths classified as protected.",
++        "1 changed paths classified as security_sensitive.",
++        "1 changed paths classified as database_migration.",
++        "1 changed paths classified as automation_or_deployment.",
++        "1 changed paths classified as dependency_manifest.",
++    ]
++
++
++def test_rename_previous_path_is_fully_classified() -> None:
++    renamed = ReviewCostChangedFile(
++        path="src/new_name.py",
++        previous_path="security/auth.py",
++        change_type=ReviewCostChangeType.RENAMED,
++        additions=1,
++        deletions=1,
++    )
++
++    actual, evidence, _ = score(
++        input_model(
++            files=[renamed],
++            protected_changed_paths=["security/auth.py"],
++        ),
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++
++    assert actual == 100
++    assert evidence[:2] == [
++        "1 changed paths classified as protected.",
++        "1 changed paths classified as security_sensitive.",
++    ]
++    assert "protected: security/auth.py" in evidence
++
++
++def test_risk_evidence_bound_does_not_change_score() -> None:
++    selected = input_model(
++        files=[file("security/auth/token.py")],
++        protected_changed_paths=["security/auth/token.py"],
++    )
++    full, _, _ = score(
++        selected,
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++    )
++    bounded, evidence, _ = score(
++        selected,
++        ReviewCostSignal.RISK_SENSITIVE_PATHS,
++        evidence_limit=1,
++    )
++    assert bounded == full == 100
++    assert evidence == ["1 changed paths classified as protected."]
++
++
++@pytest.mark.parametrize(
++    ("updates", "minimum"),
++    [
++        ({"merge_conflict": True}, 100),
++        ({"required_checks_total": 1, "required_checks_failed": 1}, 90),
++        ({"draft": True}, 70),
++        ({"required_checks_total": 1, "required_checks_pending": 1}, 60),
++        ({"changes_requested_count": 1}, 60),
++    ],
++)
++def test_each_validation_gap(updates: dict[str, Any], minimum: int) -> None:
++    actual, evidence, _ = score(
++        input_model(files=[file("src/app.py")], **updates),
++        ReviewCostSignal.VALIDATION_GAPS,
++    )
++    assert actual >= minimum
++    assert evidence
++
++
++def test_validation_multiple_gaps_cap_and_exact_reducers() -> None:
++    selected = input_model(
++        files=[file("src/app.py"), file("tests/test_app.py")],
++        required_checks_total=2,
++        required_checks_passed=2,
++        approval_count=1,
++    )
++    actual, evidence, reducers = score(
++        selected,
++        ReviewCostSignal.VALIDATION_GAPS,
++    )
++    assert actual == 0
++    assert reducers == [
++        "All required checks passed.",
++        "Test changes accompany production changes.",
++        "At least one approval is present without an active changes-requested review.",
++    ]
++    assert evidence[-1].startswith("Reduced 10 points")
++
++
++def test_validation_reducers_clamp_zero() -> None:
++    actual, _, _ = score(
++        input_model(
++            files=[file("docs/readme.md")],
++            required_checks_total=1,
++            required_checks_passed=1,
++            approval_count=1,
++        ),
++        ReviewCostSignal.VALIDATION_GAPS,
++    )
++    assert actual == 0
++
++
++@pytest.mark.parametrize(
++    ("matches", "expected"),
++    [(0, 0), (1, 15), (4, 15), (5, 35), (9, 35), (10, 50)],
++)
++def test_history_match_count_bands(matches: int, expected: int) -> None:
++    context = ReviewCostHistoricalContext(
++        related_match_count=matches,
++        rejected_or_superseded_count=0,
++        high_significance_count=0,
++        unresolved_count=0,
++        source_history_complete=True,
++        ranking_coverage_complete=True,
++        result_truncated=False,
++    )
++    actual, _, _ = score(
++        input_model(historical_context=context),
++        ReviewCostSignal.HISTORICAL_COMPLEXITY,
++    )
++    assert actual == expected
++
++
++def test_history_factors_increment_cap_and_no_context() -> None:
++    context = ReviewCostHistoricalContext(
++        related_match_count=10,
++        rejected_or_superseded_count=1,
++        high_significance_count=1,
++        unresolved_count=1,
++        source_history_complete=True,
++        ranking_coverage_complete=True,
++        result_truncated=False,
++    )
++    actual, evidence, _ = score(
++        input_model(historical_context=context),
++        ReviewCostSignal.HISTORICAL_COMPLEXITY,
++    )
++    assert actual == 95
++    assert evidence == [
++        "10 related historical matches.",
++        "1 rejected or superseded matches.",
++        "1 high-significance matches.",
++        "1 unresolved matches.",
++    ]
++    no_context, no_evidence, _ = score(
++        input_model(historical_context=None),
++        ReviewCostSignal.HISTORICAL_COMPLEXITY,
++    )
++    assert no_context == 0
++    assert no_evidence == []
++
++
++def test_warning_order_contributions_immutability_and_determinism() -> None:
++    selected = input_model(
++        policy_present=False,
++        merge_conflict=None,
++        historical_context=ReviewCostHistoricalContext(
++            related_match_count=0,
++            rejected_or_superseded_count=0,
++            high_significance_count=0,
++            unresolved_count=0,
++            source_history_complete=False,
++            ranking_coverage_complete=False,
++            result_truncated=True,
++        ),
++    )
++    before = deepcopy(selected.model_dump())
++    service = ReviewCostAssessmentService()
++    first = service.assess(selected, assessed_at=ASSESSED_AT)
++    second = service.assess(selected, assessed_at=ASSESSED_AT)
++
++    assert [item.signal for item in first.contributions] == list(ReviewCostSignal)
++    assert first.warnings == [
++        (
++            "Repository policy was unavailable; the default preferred diff "
++            "size and no protected paths were used."
++        ),
++        "Pull-request merge-conflict state was unavailable.",
++        "Historical source collection was incomplete.",
++        "Related-work ranking coverage was incomplete.",
++        "Related-work results were truncated by the configured final result limit.",
++    ]
++    assert first.complete is False
++    assert first == second
++    assert selected.model_dump() == before
++
++
++def test_unavailable_history_warning_is_exact_and_complete_case_has_none() -> None:
++    unavailable = ReviewCostAssessmentService().assess(
++        input_model(historical_context=None),
++        assessed_at=ASSESSED_AT,
++    )
++    assert unavailable.warnings == [
++        "Historical related-work context was unavailable."
++    ]
++    complete = ReviewCostAssessmentService().assess(
++        input_model(files=[file("docs/readme.md")]),
++        assessed_at=ASSESSED_AT,
++    )
++    assert complete.warnings == []
++    assert complete.complete is True
+diff --git a/tests/test_mcp_github_review_cost.py b/tests/test_mcp_github_review_cost.py
+new file mode 100644
+index 0000000..65329d1
+--- /dev/null
++++ b/tests/test_mcp_github_review_cost.py
+@@ -0,0 +1,153 @@
++"""Tests for the thin GitHub review-cost MCP capability."""
++
++from copy import deepcopy
++from typing import Any
++
++import pytest
++
++import opensteward.mcp.github_capabilities as capabilities
++from opensteward.github import (
++    GitHubContributionInputOptions,
++    GitHubHistoricalKnowledgeSnapshotOptions,
++    GitHubRepositoryRef,
++    GitHubReviewCostRequest,
++)
++from opensteward.knowledge import KnowledgeRelatedWorkOptions
++from opensteward.policy import ContributionCategory
++from opensteward.review_intelligence import ReviewCostAssessmentOptions
++
++REPOSITORY = GitHubRepositoryRef(owner="acme", name="framework")
++
++
++class RecordingRunner:
++    """Record capability delegation and return one opaque result."""
++
++    def __init__(
++        self,
++        *,
++        result: object | None = None,
++        error: Exception | None = None,
++    ) -> None:
++        self.result = result if result is not None else object()
++        self.error = error
++        self.calls: list[GitHubReviewCostRequest] = []
++
++    async def assess(self, request: GitHubReviewCostRequest) -> Any:
++        self.calls.append(request)
++        if self.error is not None:
++            raise self.error
++        return self.result
++
++
++@pytest.mark.asyncio
++async def test_capability_constructs_default_request_and_delegates_once(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    runner = RecordingRunner()
++    monkeypatch.setattr(capabilities, "_review_cost_runner", runner)
++    categories = [ContributionCategory.ARCHITECTURE]
++    categories_before = deepcopy(categories)
++
++    result = await capabilities.assess_review_cost(
++        installation_id=41,
++        repository=REPOSITORY,
++        pull_number=17,
++        explicit_categories=categories,
++    )
++
++    assert result is runner.result
++    assert len(runner.calls) == 1
++    request = runner.calls[0]
++    assert request.installation_id == 41
++    assert request.repository == REPOSITORY
++    assert request.pull_number == 17
++    assert request.policy_path == ".opensteward.yml"
++    assert request.explicit_categories == categories
++    assert request.conversion_options == GitHubContributionInputOptions()
++    assert request.snapshot_options == GitHubHistoricalKnowledgeSnapshotOptions()
++    assert request.related_work_options == KnowledgeRelatedWorkOptions()
++    assert request.review_cost_options == ReviewCostAssessmentOptions()
++    assert categories == categories_before
++
++
++@pytest.mark.asyncio
++async def test_capability_preserves_all_explicit_options(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    runner = RecordingRunner()
++    monkeypatch.setattr(capabilities, "_review_cost_runner", runner)
++    conversion = GitHubContributionInputOptions(
++        require_complete_file_list=False
++    )
++    snapshot = GitHubHistoricalKnowledgeSnapshotOptions()
++    related = KnowledgeRelatedWorkOptions(max_results=3)
++    review_cost = ReviewCostAssessmentOptions(
++        max_evidence_items_per_signal=4
++    )
++
++    await capabilities.assess_review_cost(
++        installation_id=41,
++        repository=REPOSITORY,
++        pull_number=17,
++        policy_path="config/steward.yml",
++        explicit_categories=[ContributionCategory.SECURITY],
++        conversion_options=conversion,
++        snapshot_options=snapshot,
++        related_work_options=related,
++        review_cost_options=review_cost,
++    )
++
++    request = runner.calls[0]
++    assert request.policy_path == "config/steward.yml"
++    assert request.explicit_categories == [ContributionCategory.SECURITY]
++    assert request.conversion_options == conversion
++    assert request.snapshot_options == snapshot
++    assert request.related_work_options == related
++    assert request.review_cost_options == review_cost
++
++
++class SentinelRunnerError(RuntimeError):
++    """Distinct runner failure."""
++
++
++@pytest.mark.asyncio
++async def test_capability_propagates_runner_errors_unchanged(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    error = SentinelRunnerError("runner failed")
++    runner = RecordingRunner(error=error)
++    monkeypatch.setattr(capabilities, "_review_cost_runner", runner)
++
++    with pytest.raises(SentinelRunnerError) as exc_info:
++        await capabilities.assess_review_cost(
++            installation_id=41,
++            repository=REPOSITORY,
++            pull_number=17,
++        )
++
++    assert exc_info.value is error
++    assert runner.calls[0].pull_number == 17
++
++
++def test_capability_docstring_is_explicitly_bounded_and_read_only() -> None:
++    docstring = capabilities.assess_review_cost.__doc__ or ""
++
++    assert "expected maintainer effort" in docstring
++    for source in (
++        "pull request",
++        "repository policy",
++        "checks",
++        "reviews",
++        "changed paths",
++        "related historical work",
++    ):
++        assert source in docstring
++    for driver in ("structural", "risk", "validation", "historical"):
++        assert driver in docstring
++    assert "source or ranking coverage" in docstring
++    assert "GitHub App installation" in docstring
++    assert "read-only" in docstring
++    assert "does not comment, label, approve, reject, close" in docstring
++    assert "contributor skill" in docstring
++    assert "trustworthiness" in docstring
++    assert "httpx" not in capabilities.assess_review_cost.__code__.co_names
+diff --git a/tests/test_mcp_server.py b/tests/test_mcp_server.py
+index 7184c46..b991042 100644
+--- a/tests/test_mcp_server.py
++++ b/tests/test_mcp_server.py
+@@ -13,6 +13,8 @@ from opensteward.github import (
+     GitHubRelatedWorkResult,
+     GitHubRelatedWorkSnapshotSummary,
+     GitHubRepositoryRef,
++    GitHubReviewCostRequest,
++    GitHubReviewCostResult,
+     knowledge_repository_from_github,
+ )
+ from opensteward.knowledge import (
+@@ -25,6 +27,7 @@ from opensteward.knowledge import (
+     KnowledgeSourceKind,
+ )
+ from opensteward.mcp.server import mcp
++from tests.github.test_review_cost import completed_review_cost_result
+ 
+ 
+ @pytest.fixture
+@@ -116,6 +119,21 @@ class StaticRelatedWorkRunner:
+         return self.result
+ 
+ 
++class StaticReviewCostRunner:
++    """Return one prepared review-cost result through the registered tool."""
++
++    def __init__(self, result: GitHubReviewCostResult) -> None:
++        self.result = result
++        self.calls: list[GitHubReviewCostRequest] = []
++
++    async def assess(
++        self,
++        request: GitHubReviewCostRequest,
++    ) -> GitHubReviewCostResult:
++        self.calls.append(request)
++        return self.result
++
++
+ @pytest.mark.anyio
+ async def test_mcp_server_exposes_expected_tools(
+     client_session: ClientSession,
+@@ -132,6 +150,7 @@ async def test_mcp_server_exposes_expected_tools(
+     assert "evaluate_repository_policy" in tool_names
+     assert "assess_pull_request" in tool_names
+     assert "find_related_work" in tool_names
++    assert "assess_review_cost" in tool_names
+ 
+     resources = await client_session.list_resources()
+     assert any(
+@@ -220,6 +239,84 @@ async def test_find_related_work_invocation_returns_provenance_evidence_and_cove
+     assert "private_key" not in serialized
+ 
+ 
++@pytest.mark.anyio
++async def test_assess_review_cost_schema_is_structured(
++    client_session: ClientSession,
++) -> None:
++    result = await client_session.list_tools()
++    tool = next(tool for tool in result.tools if tool.name == "assess_review_cost")
++
++    assert set(tool.inputSchema["properties"]) == {
++        "installation_id",
++        "repository",
++        "pull_number",
++        "policy_path",
++        "explicit_categories",
++        "conversion_options",
++        "snapshot_options",
++        "related_work_options",
++        "review_cost_options",
++    }
++    assert tool.outputSchema is not None
++    assert {
++        "repository",
++        "pull_request",
++        "pull_request_assessment",
++        "related_work",
++        "review_cost",
++        "warnings",
++        "score",
++        "level",
++        "complete",
++    } <= set(tool.outputSchema["properties"])
++
++
++@pytest.mark.anyio
++async def test_assess_review_cost_invocation_returns_explainable_coverage(
++    client_session: ClientSession,
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    expected = await completed_review_cost_result()
++    runner = StaticReviewCostRunner(expected)
++    monkeypatch.setattr(
++        github_capabilities,
++        "_review_cost_runner",
++        runner,
++    )
++
++    result = await client_session.call_tool(
++        "assess_review_cost",
++        {
++            "installation_id": 73,
++            "repository": {
++                "owner": "acme",
++                "name": "framework",
++            },
++            "pull_number": 17,
++        },
++    )
++
++    assert result.isError is False
++    assert result.structuredContent is not None
++    data = result.structuredContent
++    assert data["pull_request"]["pull_number"] == 17
++    assert len(data["review_cost"]["contributions"]) == 5
++    assert data["review_cost"]["reducers"]
++    assert data["review_cost"]["warnings"] == []
++    assert data["score"] == expected.score
++    assert data["level"] == expected.level.value
++    assert data["complete"] is True
++    assert data["related_work"]["source_history_complete"] is True
++    assert data["related_work"]["ranking_coverage_complete"] is True
++    assert data["related_work"]["result_truncated"] is False
++    assert len(runner.calls) == 1
++    assert runner.calls[0].installation_id == 73
++    serialized = str(data).lower()
++    assert "installation_id" not in serialized
++    assert "private_key" not in serialized
++    assert "credentials" not in serialized
++
++
+ @pytest.mark.anyio
+ async def test_system_status_tool(
+     client_session: ClientSession,

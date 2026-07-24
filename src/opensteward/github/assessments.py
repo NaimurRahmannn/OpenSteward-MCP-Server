@@ -1,12 +1,13 @@
 """End-to-end GitHub pull-request policy assessments."""
 
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import (
-    ConfigDict,
     Field,
     field_validator,
+    model_serializer,
 )
+from pydantic.json_schema import SkipJsonSchema
 
 from opensteward.github.contribution_inputs import (
     GitHubContributionInputOptions,
@@ -183,18 +184,19 @@ class GitHubPullRequestAssessmentResult(
 ):
     """Complete evidence-backed GitHub PR assessment."""
 
-    model_config = ConfigDict(json_schema_mode_override="serialization")
-
     read_only: Literal[True] = True
 
     installation_id: int = Field(
         gt=0,
+    )
+
+    snapshot: SkipJsonSchema[GitHubPullRequestSnapshot] = Field(
         exclude=True,
     )
 
-    snapshot: GitHubPullRequestSnapshot
-
-    repository_policy: RepositoryPolicy
+    repository_policy: SkipJsonSchema[RepositoryPolicy] = Field(
+        exclude=True,
+    )
 
     summary: GitHubPullRequestAssessmentSummary
 
@@ -205,6 +207,40 @@ class GitHubPullRequestAssessmentResult(
     packet: MaintainerPolicyPacket
 
     evaluation: PolicyEvaluationResult
+
+    @model_serializer(mode="wrap")
+    def serialize_public_result(
+        self,
+        _handler: Any,
+        info: Any,
+    ) -> dict[str, Any]:
+        """Serialize the established public assessment contract."""
+
+        mode = "json" if info.mode == "json" else "python"
+        return {
+            "read_only": self.read_only,
+            "installation_id": self.installation_id,
+            "summary": self.summary.model_dump(
+                mode=mode,
+                exclude_computed_fields=True,
+            ),
+            "policy": self.policy.model_dump(
+                mode=mode,
+                exclude_computed_fields=True,
+            ),
+            "conversion": self.conversion.model_dump(
+                mode=mode,
+                exclude_computed_fields=True,
+            ),
+            "packet": self.packet.model_dump(
+                mode=mode,
+                exclude_computed_fields=True,
+            ),
+            "evaluation": self.evaluation.model_dump(
+                mode=mode,
+                exclude_computed_fields=True,
+            ),
+        }
 
 
 class PullRequestSnapshotLoader(Protocol):
