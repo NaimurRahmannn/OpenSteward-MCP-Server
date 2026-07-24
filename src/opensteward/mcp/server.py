@@ -1,16 +1,18 @@
 from mcp.server.fastmcp import FastMCP
 
 from opensteward import __version__
-from opensteward.models import ReviewCostFactors,ReviewCostResult
-from opensteward.review_cost import calculate_review_cost
-from opensteward.settings import get_settings
+from opensteward.mcp.github_capabilities import (
+    assess_pull_request,
+    find_related_work,
+)
 from opensteward.mcp.policy_capabilities import (
     evaluate_repository_policy,
     repository_policy_resource,
 )
-from opensteward.mcp.github_capabilities import (
-    assess_pull_request,
-)
+from opensteward.models import ReviewCostFactors, ReviewCostResult
+from opensteward.review_cost import calculate_review_cost
+from opensteward.settings import get_settings
+
 mcp=FastMCP(
     name="OpenSteward",
     stateless_http=True,
@@ -48,6 +50,7 @@ def estimate_review_cost(
     return calculate_review_cost(factors)
 mcp.tool()(evaluate_repository_policy)
 mcp.tool()(assess_pull_request)
+mcp.tool()(find_related_work)
 mcp.resource(
     "steward://repository/policy"
 )(repository_policy_resource)

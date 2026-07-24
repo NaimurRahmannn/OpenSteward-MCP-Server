@@ -105,6 +105,15 @@ from opensteward.github.pull_requests import (
     GitHubPullRequestSnapshot,
     GitHubPullRequestSnapshotError,
 )
+from opensteward.github.related_work import (
+    GitHubRelatedWorkError,
+    GitHubRelatedWorkQuery,
+    GitHubRelatedWorkRequest,
+    GitHubRelatedWorkResult,
+    GitHubRelatedWorkRunner,
+    GitHubRelatedWorkService,
+    GitHubRelatedWorkSnapshotSummary,
+)
 from opensteward.github.repositories import (
     MAX_REPOSITORY_POLICY_BYTES,
     GitHubRepositoryMetadata,
@@ -126,6 +135,7 @@ from opensteward.github.rest_client import (
 )
 from opensteward.github.runtime import (
     LiveGitHubPullRequestAssessmentRunner,
+    LiveGitHubRelatedWorkRunner,
 )
 from opensteward.github.settings import (
     GitHubAppSettings,
@@ -203,6 +213,13 @@ __all__ = [
     "GitHubRepositoryPolicyFileError",
     "GitHubRepositoryPolicyResult",
     "GitHubRepositoryService",
+    "GitHubRelatedWorkError",
+    "GitHubRelatedWorkQuery",
+    "GitHubRelatedWorkRequest",
+    "GitHubRelatedWorkResult",
+    "GitHubRelatedWorkRunner",
+    "GitHubRelatedWorkService",
+    "GitHubRelatedWorkSnapshotSummary",
     "GITHUB_PAGE_SIZE",
     "MAX_PULL_REQUEST_FILES",
     "GitHubCheckRun",
@@ -238,4 +255,5 @@ __all__ = [
     "GitHubPullRequestAssessmentService",
     "GitHubPullRequestAssessmentSummary",
     "LiveGitHubPullRequestAssessmentRunner",
+    "LiveGitHubRelatedWorkRunner",
 ]

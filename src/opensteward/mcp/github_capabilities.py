@@ -2,21 +2,29 @@
 
 from opensteward.github import (
     GitHubContributionInputOptions,
+    GitHubHistoricalKnowledgeSnapshotOptions,
     GitHubPullRequestAssessmentRequest,
     GitHubPullRequestAssessmentResult,
     GitHubPullRequestAssessmentRunner,
+    GitHubRelatedWorkQuery,
+    GitHubRelatedWorkRequest,
+    GitHubRelatedWorkResult,
+    GitHubRelatedWorkRunner,
     GitHubRepositoryRef,
     LiveGitHubPullRequestAssessmentRunner,
+    LiveGitHubRelatedWorkRunner,
 )
+from opensteward.knowledge import KnowledgeRelatedWorkOptions
 from opensteward.policy import (
     DEFAULT_POLICY_FILENAME,
     ContributionCategory,
 )
 
-
 _assessment_runner: (
     GitHubPullRequestAssessmentRunner
 ) = LiveGitHubPullRequestAssessmentRunner()
+
+_related_work_runner: GitHubRelatedWorkRunner = LiveGitHubRelatedWorkRunner()
 
 
 async def assess_pull_request(
@@ -61,3 +69,40 @@ async def assess_pull_request(
     return await _assessment_runner.assess(
         request
     )
+
+
+async def find_related_work(
+    installation_id: int,
+    repository: GitHubRepositoryRef,
+    git_ref: str,
+    query: GitHubRelatedWorkQuery,
+    snapshot_options: GitHubHistoricalKnowledgeSnapshotOptions | None = None,
+    related_work_options: KnowledgeRelatedWorkOptions | None = None,
+) -> GitHubRelatedWorkResult:
+    """Search bounded historical GitHub issues, pull requests, paths, and ADRs.
+
+    The tool returns explainable related-work matches and reports source-history
+    and ranking completeness explicitly. It uses GitHub App installation
+    authentication and is read-only.
+
+    It does not comment, label, edit, close, merge, or otherwise modify
+    repository content.
+    """
+
+    request = GitHubRelatedWorkRequest(
+        installation_id=installation_id,
+        repository=repository,
+        git_ref=git_ref,
+        query=query,
+        snapshot_options=(
+            snapshot_options
+            if snapshot_options is not None
+            else GitHubHistoricalKnowledgeSnapshotOptions()
+        ),
+        related_work_options=(
+            related_work_options
+            if related_work_options is not None
+            else KnowledgeRelatedWorkOptions()
+        ),
+    )
+    return await _related_work_runner.find(request)
