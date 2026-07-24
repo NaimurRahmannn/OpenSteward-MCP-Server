@@ -1,5 +1,15 @@
 """Unified project knowledge and decision domain models."""
 
+from opensteward.knowledge.decision_candidates import (
+    MAX_KNOWLEDGE_DECISION_CANDIDATES,
+    KnowledgeDecisionCandidateExtractionOptions,
+    KnowledgeDecisionCandidateExtractionResult,
+    KnowledgeDecisionCandidateExtractionStats,
+    KnowledgeDecisionCandidateRule,
+    KnowledgeDecisionCandidateSkippedSource,
+    KnowledgeDecisionCandidateSkipReason,
+    extract_knowledge_decision_candidates,
+)
 from opensteward.knowledge.hybrid_ranking import (
     KNOWLEDGE_DETERMINISTIC_LABEL_WEIGHT,
     KNOWLEDGE_DETERMINISTIC_LEXICAL_WEIGHT,
@@ -113,6 +123,12 @@ __all__ = [
     "DecisionStatus",
     "KnowledgeActor",
     "KnowledgeActorType",
+    "KnowledgeDecisionCandidateExtractionOptions",
+    "KnowledgeDecisionCandidateExtractionResult",
+    "KnowledgeDecisionCandidateExtractionStats",
+    "KnowledgeDecisionCandidateRule",
+    "KnowledgeDecisionCandidateSkippedSource",
+    "KnowledgeDecisionCandidateSkipReason",
     "KnowledgeHybridRankedMatch",
     "KnowledgeHybridRankingMode",
     "KnowledgeHybridRankingOptions",
@@ -149,6 +165,7 @@ __all__ = [
     "MAX_KNOWLEDGE_HYBRID_BASIS_POINTS",
     "MAX_KNOWLEDGE_HYBRID_RESULTS",
     "MAX_KNOWLEDGE_HYBRID_SCORE",
+    "MAX_KNOWLEDGE_DECISION_CANDIDATES",
     "MAX_KNOWLEDGE_EXACT_PHRASES",
     "MAX_KNOWLEDGE_IDENTIFIERS",
     "MAX_KNOWLEDGE_LEXICAL_EVIDENCE_PER_MATCH",
@@ -194,6 +211,7 @@ __all__ = [
     "StrictKnowledgeModel",
     "build_knowledge_lexical_corpus",
     "build_knowledge_lexical_document",
+    "extract_knowledge_decision_candidates",
     "rank_knowledge_hybrid_corpus",
     "search_knowledge_lexical_corpus",
 ]
