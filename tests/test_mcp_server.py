@@ -13,6 +13,8 @@ from opensteward.github import (
     GitHubRelatedWorkResult,
     GitHubRelatedWorkSnapshotSummary,
     GitHubRepositoryRef,
+    GitHubReviewCostRequest,
+    GitHubReviewCostResult,
     knowledge_repository_from_github,
 )
 from opensteward.knowledge import (
@@ -25,6 +27,7 @@ from opensteward.knowledge import (
     KnowledgeSourceKind,
 )
 from opensteward.mcp.server import mcp
+from tests.github.test_review_cost import completed_review_cost_result
 
 
 @pytest.fixture
@@ -116,6 +119,21 @@ class StaticRelatedWorkRunner:
         return self.result
 
 
+class StaticReviewCostRunner:
+    """Return one prepared review-cost result through the registered tool."""
+
+    def __init__(self, result: GitHubReviewCostResult) -> None:
+        self.result = result
+        self.calls: list[GitHubReviewCostRequest] = []
+
+    async def assess(
+        self,
+        request: GitHubReviewCostRequest,
+    ) -> GitHubReviewCostResult:
+        self.calls.append(request)
+        return self.result
+
+
 @pytest.mark.anyio
 async def test_mcp_server_exposes_expected_tools(
     client_session: ClientSession,
@@ -132,6 +150,7 @@ async def test_mcp_server_exposes_expected_tools(
     assert "evaluate_repository_policy" in tool_names
     assert "assess_pull_request" in tool_names
     assert "find_related_work" in tool_names
+    assert "assess_review_cost" in tool_names
 
     resources = await client_session.list_resources()
     assert any(
@@ -218,6 +237,84 @@ async def test_find_related_work_invocation_returns_provenance_evidence_and_cove
     assert "installation_id" not in serialized
     assert "token" not in serialized
     assert "private_key" not in serialized
+
+
+@pytest.mark.anyio
+async def test_assess_review_cost_schema_is_structured(
+    client_session: ClientSession,
+) -> None:
+    result = await client_session.list_tools()
+    tool = next(tool for tool in result.tools if tool.name == "assess_review_cost")
+
+    assert set(tool.inputSchema["properties"]) == {
+        "installation_id",
+        "repository",
+        "pull_number",
+        "policy_path",
+        "explicit_categories",
+        "conversion_options",
+        "snapshot_options",
+        "related_work_options",
+        "review_cost_options",
+    }
+    assert tool.outputSchema is not None
+    assert {
+        "repository",
+        "pull_request",
+        "pull_request_assessment",
+        "related_work",
+        "review_cost",
+        "warnings",
+        "score",
+        "level",
+        "complete",
+    } <= set(tool.outputSchema["properties"])
+
+
+@pytest.mark.anyio
+async def test_assess_review_cost_invocation_returns_explainable_coverage(
+    client_session: ClientSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = await completed_review_cost_result()
+    runner = StaticReviewCostRunner(expected)
+    monkeypatch.setattr(
+        github_capabilities,
+        "_review_cost_runner",
+        runner,
+    )
+
+    result = await client_session.call_tool(
+        "assess_review_cost",
+        {
+            "installation_id": 73,
+            "repository": {
+                "owner": "acme",
+                "name": "framework",
+            },
+            "pull_number": 17,
+        },
+    )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    data = result.structuredContent
+    assert data["pull_request"]["pull_number"] == 17
+    assert len(data["review_cost"]["contributions"]) == 5
+    assert data["review_cost"]["reducers"]
+    assert data["review_cost"]["warnings"] == []
+    assert data["score"] == expected.score
+    assert data["level"] == expected.level.value
+    assert data["complete"] is True
+    assert data["related_work"]["source_history_complete"] is True
+    assert data["related_work"]["ranking_coverage_complete"] is True
+    assert data["related_work"]["result_truncated"] is False
+    assert len(runner.calls) == 1
+    assert runner.calls[0].installation_id == 73
+    serialized = str(data).lower()
+    assert "installation_id" not in serialized
+    assert "private_key" not in serialized
+    assert "credentials" not in serialized
 
 
 @pytest.mark.anyio

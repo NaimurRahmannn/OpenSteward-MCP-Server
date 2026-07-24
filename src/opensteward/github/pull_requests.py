@@ -25,7 +25,6 @@ from opensteward.github.rest_client import (
 )
 from opensteward.policy import normalize_repository_path
 
-
 GITHUB_PAGE_SIZE = 100
 MAX_PULL_REQUEST_FILES = 3_000
 MAX_PAGINATION_PAGES = 100
@@ -120,6 +119,7 @@ class GitHubPullRequestDetails(StrictGitHubModel):
     mergeable_state: str | None = None
 
     html_url: str = Field(min_length=1)
+    labels: list[str] = Field(default_factory=list)
 
     author: GitHubPullRequestActor
 
@@ -135,6 +135,18 @@ class GitHubPullRequestDetails(StrictGitHubModel):
     updated_at: datetime
     closed_at: datetime | None = None
     merged_at: datetime | None = None
+
+    @field_validator("labels")
+    @classmethod
+    def validate_labels(cls, labels: list[str]) -> list[str]:
+        """Require non-empty labels that are unique case-insensitively."""
+
+        if any(not label for label in labels):
+            raise ValueError("Pull-request labels must not be empty.")
+        keys = [label.casefold() for label in labels]
+        if len(keys) != len(set(keys)):
+            raise ValueError("Pull-request labels must be unique case-insensitively.")
+        return labels
 
     @computed_field
     @property
@@ -336,6 +348,10 @@ class _ApiActor(_GitHubApiModel):
     type: str = Field(min_length=1)
 
 
+class _ApiLabel(_GitHubApiModel):
+    name: str = Field(min_length=1)
+
+
 class _ApiRepository(_GitHubApiModel):
     id: int = Field(gt=0)
     name: str = Field(min_length=1)
@@ -363,6 +379,7 @@ class _ApiPullRequest(_GitHubApiModel):
     mergeable_state: str | None = None
 
     html_url: str = Field(min_length=1)
+    labels: list[_ApiLabel] = Field(default_factory=list)
 
     user: _ApiActor
     base: _ApiPullRequestBranch
@@ -514,6 +531,14 @@ def _convert_pull_request(
 
     assert author is not None
 
+    labels: list[str] = []
+    seen_labels: set[str] = set()
+    for label in pull_request.labels:
+        key = label.name.casefold()
+        if key not in seen_labels:
+            seen_labels.add(key)
+            labels.append(label.name)
+
     return GitHubPullRequestDetails(
         id=pull_request.id,
         number=pull_request.number,
@@ -525,6 +550,7 @@ def _convert_pull_request(
         mergeable=pull_request.mergeable,
         mergeable_state=pull_request.mergeable_state,
         html_url=pull_request.html_url,
+        labels=labels,
         author=author,
         base=_convert_branch(
             pull_request.base

@@ -3,6 +3,7 @@
 from typing import Literal, Protocol
 
 from pydantic import (
+    ConfigDict,
     Field,
     field_validator,
 )
@@ -29,6 +30,7 @@ from opensteward.policy import (
     MaintainerPolicyPacket,
     PolicyEvaluationResult,
     PolicySource,
+    RepositoryPolicy,
     build_maintainer_policy_packet,
     evaluate_contribution_policy,
     normalize_repository_path,
@@ -181,11 +183,18 @@ class GitHubPullRequestAssessmentResult(
 ):
     """Complete evidence-backed GitHub PR assessment."""
 
+    model_config = ConfigDict(json_schema_mode_override="serialization")
+
     read_only: Literal[True] = True
 
     installation_id: int = Field(
         gt=0,
+        exclude=True,
     )
+
+    snapshot: GitHubPullRequestSnapshot
+
+    repository_policy: RepositoryPolicy
 
     summary: GitHubPullRequestAssessmentSummary
 
@@ -483,6 +492,10 @@ class GitHubPullRequestAssessmentService:
         return GitHubPullRequestAssessmentResult(
             installation_id=(
                 request.installation_id
+            ),
+            snapshot=snapshot,
+            repository_policy=(
+                policy_result.loaded_policy.policy
             ),
             summary=_build_summary(
                 snapshot

@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP
 from opensteward import __version__
 from opensteward.mcp.github_capabilities import (
     assess_pull_request,
+    assess_review_cost,
     find_related_work,
 )
 from opensteward.mcp.policy_capabilities import (
@@ -51,6 +52,7 @@ def estimate_review_cost(
 mcp.tool()(evaluate_repository_policy)
 mcp.tool()(assess_pull_request)
 mcp.tool()(find_related_work)
+mcp.tool()(assess_review_cost)
 mcp.resource(
     "steward://repository/policy"
 )(repository_policy_resource)
