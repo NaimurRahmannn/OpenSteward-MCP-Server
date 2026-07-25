@@ -48,6 +48,10 @@ _RELATED_WORK_LEXICAL_FALLBACK_WARNING = (
 _RELATED_WORK_SEMANTIC_FALLBACK_WARNING = (
     "Semantic scoring was unavailable; deterministic related-work ranking was used."
 )
+_RELATED_WORK_CANDIDATE_TRUNCATION_WARNING = (
+    "Lexical candidate retrieval reached its safety limit; only the top candidates "
+    "were ranked."
+)
 
 
 class KnowledgeRelatedWorkMode(StrEnum):
@@ -310,6 +314,7 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
     corpus_total_count: int = Field(ge=0)
     eligible_document_count: int = Field(ge=0)
     lexical_matched_document_count: int = Field(ge=0)
+    retrieved_document_count: int = Field(ge=0)
     candidate_count: int = Field(ge=0)
     semantic_status: KnowledgeSemanticScoringStatus | None = None
     semantic_provider: str | None = None
@@ -348,8 +353,12 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError("Corpus count must be at least the eligible count.")
         if self.eligible_document_count < self.lexical_matched_document_count:
             raise ValueError("Eligible count must be at least the lexical matched count.")
-        if self.eligible_document_count < self.candidate_count:
-            raise ValueError("Eligible count must be at least the candidate count.")
+        if self.lexical_matched_document_count < self.retrieved_document_count:
+            raise ValueError(
+                "Lexical matched count must be at least the retrieved count."
+            )
+        if self.retrieved_document_count < self.candidate_count:
+            raise ValueError("Retrieved count must be at least the candidate count.")
         if self.candidate_count < len(self.matches):
             raise ValueError("Candidate count must be at least the returned count.")
         if len(self.matches) > self.options.max_results:
@@ -377,6 +386,21 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError("Every related-work match must belong to the repository.")
         if any(match.mode != self.mode for match in self.matches):
             raise ValueError("Every related-work match must use the result mode.")
+        candidate_retrieval_truncated = (
+            self.retrieved_document_count
+            < self.lexical_matched_document_count
+        )
+        has_candidate_warning = (
+            _RELATED_WORK_CANDIDATE_TRUNCATION_WARNING
+            in self.warnings
+        )
+        if (
+            self.mode != KnowledgeRelatedWorkMode.LEXICAL_FALLBACK
+            and candidate_retrieval_truncated != has_candidate_warning
+        ):
+            raise ValueError(
+                "Candidate retrieval truncation must match its coverage warning."
+            )
 
         self._validate_ranking()
         if self.mode == KnowledgeRelatedWorkMode.LEXICAL_FALLBACK:
@@ -410,10 +434,8 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             )
         if self.warnings != [_RELATED_WORK_LEXICAL_FALLBACK_WARNING]:
             raise ValueError("Lexical fallback requires its exact coverage warning.")
-        if self.candidate_count != self.lexical_matched_document_count:
-            raise ValueError(
-                "Lexical fallback candidate count must equal lexical matched count."
-            )
+        if self.retrieved_document_count >= self.lexical_matched_document_count:
+            raise ValueError("Lexical fallback requires truncated candidate retrieval.")
 
     def _validate_deterministic(self) -> None:
         skipped_statuses = {
@@ -427,17 +449,17 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
         if (
             self.semantic_status
             == KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS
-            and self.eligible_document_count != 0
+            and self.retrieved_document_count != 0
         ):
             raise ValueError(
-                "NO_ELIGIBLE_DOCUMENTS requires zero eligible related-work documents."
+                "NO_ELIGIBLE_DOCUMENTS requires zero retrieved documents."
             )
         if (
             self.semantic_status == KnowledgeSemanticScoringStatus.NO_SEMANTIC_QUERY
-            and self.eligible_document_count == 0
+            and self.retrieved_document_count == 0
         ):
             raise ValueError(
-                "NO_SEMANTIC_QUERY requires eligible related-work documents."
+                "NO_SEMANTIC_QUERY requires retrieved documents."
             )
         if (
             self.semantic_provider is not None
@@ -447,9 +469,20 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError(
                 "Deterministic related work must not contain scored semantic provenance."
             )
-        if self.warnings not in (
-            [],
-            [_RELATED_WORK_SEMANTIC_FALLBACK_WARNING],
+        allowed_warnings = {
+            _RELATED_WORK_SEMANTIC_FALLBACK_WARNING,
+            _RELATED_WORK_CANDIDATE_TRUNCATION_WARNING,
+        }
+        if (
+            any(warning not in allowed_warnings for warning in self.warnings)
+            or self.warnings != [
+                warning
+                for warning in (
+                    _RELATED_WORK_CANDIDATE_TRUNCATION_WARNING,
+                    _RELATED_WORK_SEMANTIC_FALLBACK_WARNING,
+                )
+                if warning in self.warnings
+            ]
         ):
             raise ValueError(
                 "Deterministic related work contains unsupported warnings."
@@ -460,12 +493,15 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError("Hybrid related work requires SCORED semantic status.")
         if not self.semantic_provider or not self.semantic_model:
             raise ValueError("Hybrid related work requires provider and model provenance.")
-        if self.semantic_scored_document_count != self.eligible_document_count:
+        if self.semantic_scored_document_count != self.retrieved_document_count:
             raise ValueError(
-                "Hybrid semantic scoring must cover every eligible document."
+                "Hybrid semantic scoring must cover every retrieved document."
             )
-        if self.warnings:
-            raise ValueError("Hybrid related work must not contain warnings.")
+        if self.warnings not in (
+            [],
+            [_RELATED_WORK_CANDIDATE_TRUNCATION_WARNING],
+        ):
+            raise ValueError("Hybrid related work contains unsupported warnings.")
         for match in self.matches:
             assert match.hybrid_match is not None
             assert match.hybrid_match.semantic_similarity is not None
@@ -493,7 +529,11 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
     def truncated(self) -> bool:
         """Return whether the final result bound omitted candidates."""
 
-        return self.candidate_count > self.returned_count
+        return (
+            self.retrieved_document_count
+            < self.lexical_matched_document_count
+            or self.candidate_count > self.returned_count
+        )
 
     @computed_field
     @property
@@ -507,7 +547,10 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
     def complete_ranking_coverage(self) -> bool:
         """Return whether candidate ranking had complete lexical coverage."""
 
-        return self.mode != KnowledgeRelatedWorkMode.LEXICAL_FALLBACK
+        return (
+            self.retrieved_document_count
+            == self.lexical_matched_document_count
+        )
 
 
 class KnowledgeSemanticScoringServiceProtocol(Protocol):
@@ -601,8 +644,14 @@ class KnowledgeRelatedWorkService:
         self,
         *,
         semantic_scoring_service: KnowledgeSemanticScoringServiceProtocol | None = None,
+        semantic_candidate_limit: int = MAX_KNOWLEDGE_LEXICAL_RESULTS,
     ) -> None:
+        if not 1 <= semantic_candidate_limit <= MAX_KNOWLEDGE_LEXICAL_RESULTS:
+            raise ValueError(
+                "semantic_candidate_limit must be within lexical safety bounds."
+            )
         self._semantic_scoring_service = semantic_scoring_service
+        self._semantic_candidate_limit = semantic_candidate_limit
 
     async def find(
         self,
@@ -629,15 +678,26 @@ class KnowledgeRelatedWorkService:
 
         items_by_key = {item.key: item for item in items}
         corpus = build_knowledge_lexical_corpus(query.repository, items)
+        lexical_candidate_limit = (
+            min(
+                self._semantic_candidate_limit,
+                effective_options.semantic_scoring.max_documents,
+            )
+            if self._semantic_scoring_service is not None
+            else MAX_KNOWLEDGE_LEXICAL_RESULTS
+        )
         lexical_result = search_knowledge_lexical_corpus(
             query,
             corpus,
             options=KnowledgeLexicalSearchOptions(
-                max_results=MAX_KNOWLEDGE_LEXICAL_RESULTS,
+                max_results=lexical_candidate_limit,
                 minimum_score=1,
             ),
         )
-        if lexical_result.truncated:
+        if (
+            lexical_result.truncated
+            and self._semantic_scoring_service is None
+        ):
             qualifying_lexical_matches = [
                 match
                 for match in lexical_result.matches
@@ -661,20 +721,43 @@ class KnowledgeRelatedWorkService:
                 lexical_matched_document_count=(
                     lexical_result.matched_document_count
                 ),
-                candidate_count=lexical_result.matched_document_count,
+                retrieved_document_count=len(lexical_result.matches),
+                candidate_count=len(qualifying_lexical_matches),
                 semantic_scored_document_count=0,
                 matches=matches,
                 warnings=[_RELATED_WORK_LEXICAL_FALLBACK_WARNING],
             )
 
+        ranking_corpus = corpus
+        ranking_lexical_result = lexical_result
         semantic_result: KnowledgeSemanticScoringResult | None = None
         semantic_scores = None
         warnings: list[str] = []
         if self._semantic_scoring_service is not None:
+            candidate_items = [
+                items_by_key[match.item_key]
+                for match in lexical_result.matches
+            ]
+            ranking_corpus = build_knowledge_lexical_corpus(
+                query.repository,
+                candidate_items,
+            )
+            ranking_lexical_result = search_knowledge_lexical_corpus(
+                query,
+                ranking_corpus,
+                options=KnowledgeLexicalSearchOptions(
+                    max_results=MAX_KNOWLEDGE_LEXICAL_RESULTS,
+                    minimum_score=1,
+                ),
+            )
+            if lexical_result.truncated:
+                warnings.append(
+                    _RELATED_WORK_CANDIDATE_TRUNCATION_WARNING
+                )
             try:
                 semantic_result = await self._semantic_scoring_service.score(
                     query,
-                    corpus,
+                    ranking_corpus,
                     options=effective_options.semantic_scoring,
                 )
             except KnowledgeSemanticScorerUnavailableError:
@@ -686,15 +769,17 @@ class KnowledgeRelatedWorkService:
                     semantic_result,
                     query=query,
                     repository=query.repository,
-                    eligible_document_count=lexical_result.eligible_document_count,
+                    eligible_document_count=(
+                        ranking_lexical_result.eligible_document_count
+                    ),
                 )
                 if semantic_result.status == KnowledgeSemanticScoringStatus.SCORED:
                     semantic_scores = semantic_result.similarities
 
         hybrid_result = rank_knowledge_hybrid_corpus(
             query,
-            corpus,
-            lexical_result,
+            ranking_corpus,
+            ranking_lexical_result,
             semantic_scores,
             as_of=normalized_as_of,
             options=KnowledgeHybridRankingOptions(
@@ -735,6 +820,7 @@ class KnowledgeRelatedWorkService:
             corpus_total_count=corpus.total_count,
             eligible_document_count=lexical_result.eligible_document_count,
             lexical_matched_document_count=lexical_result.matched_document_count,
+            retrieved_document_count=len(lexical_result.matches),
             candidate_count=hybrid_result.candidate_count,
             semantic_status=semantic_status,
             semantic_provider=(

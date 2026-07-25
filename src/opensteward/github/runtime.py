@@ -57,6 +57,7 @@ from opensteward.github.settings import (
     get_github_settings,
 )
 from opensteward.knowledge import (
+    MAX_KNOWLEDGE_LEXICAL_RESULTS,
     KnowledgeRelatedWorkService,
     KnowledgeSemanticScoringService,
 )
@@ -112,7 +113,11 @@ def _build_related_work_finder(
     )
 
     return KnowledgeRelatedWorkService(
-        semantic_scoring_service=semantic_service
+        semantic_scoring_service=semantic_service,
+        semantic_candidate_limit=min(
+            settings.semantic_max_documents,
+            MAX_KNOWLEDGE_LEXICAL_RESULTS,
+        ),
     )
 
 

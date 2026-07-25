@@ -412,5 +412,6 @@ def test_enabled_semantics_builds_and_injects_configured_service(
     assert calls["finder"] == {
         "semantic_scoring_service": (
             semantic_service
-        )
+        ),
+        "semantic_candidate_limit": 42,
     }

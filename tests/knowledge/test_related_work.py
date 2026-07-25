@@ -66,6 +66,10 @@ FALLBACK_WARNING = (
 SEMANTIC_FALLBACK_WARNING = (
     "Semantic scoring was unavailable; deterministic related-work ranking was used."
 )
+CANDIDATE_TRUNCATION_WARNING = (
+    "Lexical candidate retrieval reached its safety limit; only the top candidates "
+    "were ranked."
+)
 
 
 def make_item(
@@ -182,11 +186,15 @@ class RecordingSemanticService:
             return self.result
 
         documents = eligible_documents(query, corpus)
-        if self.status == KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS:
+        if (
+            not documents
+            or self.status
+            == KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS
+        ):
             return KnowledgeSemanticScoringResult(
                 repository=query.repository,
                 query=query,
-                status=self.status,
+                status=KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS,
                 eligible_document_count=0,
                 scored_document_count=0,
                 query_truncated=False,
@@ -335,6 +343,10 @@ def test_public_modes_defaults_and_option_bounds() -> None:
             KnowledgeRelatedWorkOptions(
                 minimum_relevance_score=value
             )
+        with pytest.raises(ValueError, match="semantic_candidate_limit"):
+            KnowledgeRelatedWorkService(
+                semantic_candidate_limit=value
+            )
 
 
 def test_options_preserve_nested_semantic_options() -> None:
@@ -462,19 +474,23 @@ async def test_match_rejects_invalid_mode_shapes_and_source_identity() -> None:
 
 
 @pytest.mark.asyncio
-async def test_semantic_only_hybrid_match_is_accepted() -> None:
+async def test_semantic_scoring_requires_a_lexically_retrieved_candidate() -> None:
     item = make_item(title="Unrelated historical title")
     query = make_query(
         text="semantic-only query",
         affected_paths=[],
         labels=[],
     )
-    result, _ = await hybrid_result(item, query=query)
-    match = result.matches[0]
-    assert match.mode == KnowledgeRelatedWorkMode.HYBRID
-    assert match.lexical_match is None
-    assert match.hybrid_match.semantic_similarity is not None
-    assert match.lexical_evidence_count == 0
+    result, semantic_service = await hybrid_result(item, query=query)
+    assert len(semantic_service.calls) == 1
+    assert semantic_service.calls[0][1].total_count == 0
+    assert result.mode == KnowledgeRelatedWorkMode.DETERMINISTIC
+    assert (
+        result.semantic_status
+        == KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS
+    )
+    assert result.retrieved_document_count == 0
+    assert result.matches == []
 
 
 @pytest.mark.asyncio
@@ -622,21 +638,11 @@ async def test_service_uses_fixed_complete_lexical_options(
 
 
 @pytest.mark.asyncio
-async def test_lexical_fallback_is_explicit_bounded_and_skips_other_services(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_truncated_lexical_retrieval_semantically_ranks_top_candidates() -> None:
     semantic_service = RecordingSemanticService(
         KnowledgeSemanticScoringStatus.SCORED
     )
 
-    def forbidden_hybrid_ranking(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("Hybrid ranking must not run during lexical fallback.")
-
-    monkeypatch.setattr(
-        related_work_module,
-        "rank_knowledge_hybrid_corpus",
-        forbidden_hybrid_ranking,
-    )
     result = await KnowledgeRelatedWorkService(
         semantic_scoring_service=semantic_service
     ).find(
@@ -646,26 +652,97 @@ async def test_lexical_fallback_is_explicit_bounded_and_skips_other_services(
         options=KnowledgeRelatedWorkOptions(max_results=3),
     )
 
-    assert result.mode == KnowledgeRelatedWorkMode.LEXICAL_FALLBACK
-    assert semantic_service.calls == []
-    assert result.warnings == [FALLBACK_WARNING]
+    assert result.mode == KnowledgeRelatedWorkMode.HYBRID
+    assert len(semantic_service.calls) == 1
+    assert semantic_service.calls[0][1].total_count == 100
+    assert result.warnings == [CANDIDATE_TRUNCATION_WARNING]
     assert result.complete_ranking_coverage is False
     assert result.corpus_total_count == 101
     assert result.eligible_document_count == 101
     assert result.lexical_matched_document_count == 101
-    assert result.candidate_count == 101
+    assert result.retrieved_document_count == 100
+    assert result.candidate_count == 100
     assert result.returned_count == 3
     assert result.truncated is True
-    assert result.semantic_status is None
-    assert result.semantic_provider is None
-    assert result.semantic_model is None
-    assert result.semantic_scored_document_count == 0
+    assert result.semantic_status == KnowledgeSemanticScoringStatus.SCORED
+    assert result.semantic_provider == "recording-provider"
+    assert result.semantic_model == "recording-model"
+    assert result.semantic_scored_document_count == 100
     assert all(match.lexical_match is not None for match in result.matches)
-    assert all(match.hybrid_match is None for match in result.matches)
-    assert [match.raw_score for match in result.matches] == sorted(
-        [match.raw_score for match in result.matches],
-        reverse=True,
+    assert all(match.hybrid_match is not None for match in result.matches)
+
+
+@pytest.mark.asyncio
+async def test_over_100_eligible_documents_scores_only_lexical_candidates() -> None:
+    matching = make_item(
+        "000",
+        title="UniqueCandidate implementation",
+        labels=["other"],
+        affected_paths=["docs/matching.md"],
+        components=["other"],
     )
+    unrelated = [
+        make_item(
+            f"{index:03d}",
+            title=f"Unrelated history {index}",
+            body="Different historical work.",
+            summary="Different decision.",
+            labels=["other"],
+            affected_paths=[f"docs/unrelated-{index}.md"],
+            components=["other"],
+        )
+        for index in range(1, 151)
+    ]
+    query = make_query(
+        text=None,
+        identifiers=["UniqueCandidate"],
+        affected_paths=[],
+        labels=[],
+    )
+    semantic_service = RecordingSemanticService(
+        KnowledgeSemanticScoringStatus.SCORED
+    )
+
+    result = await KnowledgeRelatedWorkService(
+        semantic_scoring_service=semantic_service
+    ).find(
+        query,
+        [matching, *unrelated],
+        as_of=AS_OF,
+    )
+
+    assert result.eligible_document_count == 151
+    assert result.lexical_matched_document_count == 1
+    assert result.retrieved_document_count == 1
+    assert result.semantic_scored_document_count == 1
+    assert semantic_service.calls[0][1].total_count == 1
+    assert result.mode == KnowledgeRelatedWorkMode.HYBRID
+    assert result.warnings == []
+    assert result.complete_ranking_coverage is True
+
+
+@pytest.mark.asyncio
+async def test_configured_semantic_limit_bounds_lexical_candidate_retrieval() -> None:
+    semantic_service = RecordingSemanticService(
+        KnowledgeSemanticScoringStatus.SCORED
+    )
+
+    result = await KnowledgeRelatedWorkService(
+        semantic_scoring_service=semantic_service,
+        semantic_candidate_limit=42,
+    ).find(
+        make_query(),
+        fallback_items(),
+        as_of=AS_OF,
+    )
+
+    assert result.eligible_document_count == 101
+    assert result.lexical_matched_document_count == 101
+    assert result.retrieved_document_count == 42
+    assert result.semantic_scored_document_count == 42
+    assert semantic_service.calls[0][1].total_count == 42
+    assert result.mode == KnowledgeRelatedWorkMode.HYBRID
+    assert result.warnings == [CANDIDATE_TRUNCATION_WARNING]
 
 
 @pytest.mark.asyncio
@@ -796,7 +873,7 @@ async def test_scored_semantics_produce_hybrid_provenance_and_order() -> None:
 @pytest.mark.asyncio
 async def test_default_relevance_floor_excludes_weak_important_semantic_match() -> None:
     item = make_item(
-        title="Unrelated historical decision",
+        title="Absent unrelated historical decision",
         body="No matching query concepts.",
         summary="Different work.",
         state=KnowledgeItemState.REJECTED,
@@ -814,7 +891,7 @@ async def test_default_relevance_floor_excludes_weak_important_semantic_match() 
     result, _ = await hybrid_result(
         item,
         query=query,
-        scores={item.key: 60},
+        scores={item.key: 50},
     )
 
     assert result.semantic_performed is True
@@ -1042,7 +1119,7 @@ async def test_semantic_similarities_are_passed_unchanged_to_hybrid_ranking(
 
 
 @pytest.mark.asyncio
-async def test_semantic_only_candidate_can_surface_without_lexical_matches() -> None:
+async def test_semantic_only_candidate_is_not_scored_without_lexical_retrieval() -> None:
     item = make_item(title="Completely unrelated history")
     query = make_query(
         text="novel semantic request",
@@ -1050,10 +1127,11 @@ async def test_semantic_only_candidate_can_surface_without_lexical_matches() -> 
         labels=[],
     )
     result, _ = await hybrid_result(item, query=query)
+    assert result.mode == KnowledgeRelatedWorkMode.DETERMINISTIC
     assert result.lexical_matched_document_count == 0
-    assert result.candidate_count == 1
-    assert result.returned_count == 1
-    assert result.matches[0].lexical_match is None
+    assert result.retrieved_document_count == 0
+    assert result.candidate_count == 0
+    assert result.returned_count == 0
 
 
 @pytest.mark.asyncio
@@ -1243,7 +1321,7 @@ async def test_result_validates_mode_specific_provenance_and_warnings() -> None:
             }
         )
     assert (
-        "NO_ELIGIBLE_DOCUMENTS requires zero eligible related-work documents."
+        "NO_ELIGIBLE_DOCUMENTS requires zero retrieved documents."
         in str(no_eligible.value)
     )
 
@@ -1258,7 +1336,7 @@ async def test_result_validates_mode_specific_provenance_and_warnings() -> None:
             }
         )
     assert (
-        "NO_SEMANTIC_QUERY requires eligible related-work documents."
+        "NO_SEMANTIC_QUERY requires retrieved documents."
         in str(no_semantic_query.value)
     )
 
