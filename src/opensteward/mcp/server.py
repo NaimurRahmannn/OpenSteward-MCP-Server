@@ -5,6 +5,7 @@ from opensteward.mcp.github_capabilities import (
     assess_pull_request,
     assess_review_cost,
     find_related_work,
+    get_maintainer_brief,
 )
 from opensteward.mcp.policy_capabilities import (
     evaluate_repository_policy,
@@ -53,6 +54,7 @@ mcp.tool()(evaluate_repository_policy)
 mcp.tool()(assess_pull_request)
 mcp.tool()(find_related_work)
 mcp.tool()(assess_review_cost)
+mcp.tool()(get_maintainer_brief)
 mcp.resource(
     "steward://repository/policy"
 )(repository_policy_resource)

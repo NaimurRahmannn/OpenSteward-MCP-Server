@@ -78,6 +78,16 @@ class ReviewCostPathCategory(StrEnum):
     PRODUCTION = "production"
 
 
+_REVIEW_COST_PATH_CATEGORY_ORDER = tuple(ReviewCostPathCategory)
+_REVIEW_COST_RISK_CATEGORIES = {
+    ReviewCostPathCategory.PROTECTED,
+    ReviewCostPathCategory.SECURITY_SENSITIVE,
+    ReviewCostPathCategory.DATABASE_MIGRATION,
+    ReviewCostPathCategory.AUTOMATION_OR_DEPLOYMENT,
+    ReviewCostPathCategory.DEPENDENCY_MANIFEST,
+}
+
+
 def normalize_review_cost_path(path: str) -> str:
     """Normalize and validate one repository-relative path."""
 
@@ -94,6 +104,57 @@ def normalize_review_cost_path(path: str) -> str:
     if any(part in {".", ".."} for part in parts):
         raise ValueError("Review-cost paths must not contain '.' or '..' segments.")
     return normalized
+
+
+class ReviewCostPathClassification(StrictKnowledgeModel):
+    """Structured categories assigned to one normalized repository path."""
+
+    path: str
+    categories: list[ReviewCostPathCategory] = Field(min_length=1)
+
+    @field_validator("path")
+    @classmethod
+    def normalize_path(cls, path: str) -> str:
+        return normalize_review_cost_path(path)
+
+    @field_validator("categories")
+    @classmethod
+    def validate_categories(
+        cls,
+        categories: list[ReviewCostPathCategory],
+    ) -> list[ReviewCostPathCategory]:
+        if len(categories) != len(set(categories)):
+            raise ValueError("Review-cost path categories must be unique.")
+        expected = [
+            category
+            for category in _REVIEW_COST_PATH_CATEGORY_ORDER
+            if category in categories
+        ]
+        if categories != expected:
+            raise ValueError(
+                "Review-cost path categories must use the exact category order."
+            )
+        if (
+            ReviewCostPathCategory.TEST in categories
+            and ReviewCostPathCategory.PRODUCTION in categories
+        ):
+            raise ValueError("TEST and PRODUCTION categories must not both be present.")
+        if (
+            ReviewCostPathCategory.DOCUMENTATION in categories
+            and ReviewCostPathCategory.PRODUCTION in categories
+        ):
+            raise ValueError(
+                "DOCUMENTATION and PRODUCTION categories must not both be present."
+            )
+        return categories
+
+    @computed_field
+    @property
+    def risk_category_count(self) -> int:
+        return sum(
+            category in _REVIEW_COST_RISK_CATEGORIES
+            for category in self.categories
+        )
 
 
 def _validate_unique_text(values: list[str], field_name: str) -> list[str]:

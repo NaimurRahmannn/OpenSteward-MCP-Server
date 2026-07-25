@@ -19,7 +19,9 @@ from opensteward.review_intelligence import (
     ReviewCostChangedFile,
     ReviewCostChangeType,
     ReviewCostHistoricalContext,
+    ReviewCostPathCategory,
     ReviewCostSignal,
+    classify_review_cost_paths,
 )
 
 REPOSITORY = KnowledgeRepositoryRef(
@@ -97,6 +99,75 @@ def score(
         item for item in result.contributions if item.signal == signal
     )
     return contribution.signal_score, contribution.evidence, result.reducers
+
+
+def test_public_path_classification_covers_renames_deduplicates_and_sorts() -> None:
+    files = [
+        ReviewCostChangedFile(
+            path="./src\\security\\auth.py",
+            previous_path="src/legacy/auth.py",
+            change_type=ReviewCostChangeType.RENAMED,
+            additions=1,
+            deletions=1,
+        ),
+        file("docs/guide.md"),
+        file("src/security/auth.py"),
+    ]
+    protected = ["src/legacy/auth.py"]
+    before = deepcopy((files, protected))
+
+    result = classify_review_cost_paths(files, protected)
+
+    assert [item.path for item in result] == [
+        "docs/guide.md",
+        "src/legacy/auth.py",
+        "src/security/auth.py",
+    ]
+    assert result[0].categories == [ReviewCostPathCategory.DOCUMENTATION]
+    assert result[1].categories == [
+        ReviewCostPathCategory.PROTECTED,
+        ReviewCostPathCategory.SECURITY_SENSITIVE,
+        ReviewCostPathCategory.PRODUCTION,
+    ]
+    assert result[2].categories == [
+        ReviewCostPathCategory.SECURITY_SENSITIVE,
+        ReviewCostPathCategory.PRODUCTION,
+    ]
+    assert (files, protected) == before
+
+
+def test_public_path_classification_rejects_unknown_protected_path() -> None:
+    with pytest.raises(ValueError, match="identify a changed file path"):
+        classify_review_cost_paths(
+            [file("src/app.py")],
+            ["src/other.py"],
+        )
+
+
+def test_public_classification_refactor_preserves_scoring_output() -> None:
+    selected = input_model(
+        files=[
+            file("src/security/auth.py", changes=240),
+            file("tests/test_auth.py", changes=30),
+            file(".github/workflows/ci.yml", changes=10),
+        ],
+        protected_changed_paths=["src/security/auth.py"],
+        required_checks_total=1,
+        required_checks_passed=1,
+        approval_count=1,
+    )
+
+    first = ReviewCostAssessmentService().assess(
+        selected,
+        assessed_at=ASSESSED_AT,
+    )
+    second = ReviewCostAssessmentService().assess(
+        selected,
+        assessed_at=ASSESSED_AT,
+    )
+
+    assert first == second
+    assert first.model_dump() == second.model_dump()
 
 
 @pytest.mark.parametrize(

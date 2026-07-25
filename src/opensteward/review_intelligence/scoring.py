@@ -13,9 +13,12 @@ from opensteward.review_intelligence.models import (
     ReviewCostAssessment,
     ReviewCostAssessmentInput,
     ReviewCostAssessmentOptions,
+    ReviewCostChangedFile,
     ReviewCostPathCategory,
+    ReviewCostPathClassification,
     ReviewCostSignal,
     ReviewCostSignalContribution,
+    normalize_review_cost_path,
 )
 
 _RISK_CATEGORY_ORDER = (
@@ -182,6 +185,35 @@ def _classify_path(
     if not is_test and not is_documentation:
         categories.append(ReviewCostPathCategory.PRODUCTION)
     return tuple(categories)
+
+
+def classify_review_cost_paths(
+    files: list[ReviewCostChangedFile],
+    protected_changed_paths: list[str],
+) -> list[ReviewCostPathClassification]:
+    """Classify every current and previous path using review-cost rules."""
+
+    paths = {
+        path
+        for changed_file in files
+        for path in (changed_file.path, changed_file.previous_path)
+        if path is not None
+    }
+    protected = {
+        normalize_review_cost_path(path)
+        for path in protected_changed_paths
+    }
+    if any(path not in paths for path in protected):
+        raise ValueError(
+            "Every protected changed path must identify a changed file path."
+        )
+    return [
+        ReviewCostPathClassification(
+            path=path,
+            categories=list(_classify_path(path, protected)),
+        )
+        for path in sorted(paths)
+    ]
 
 
 def _band(value: int, bands: tuple[tuple[int, int], ...]) -> int:
@@ -473,16 +505,12 @@ class ReviewCostAssessmentService:
             raise ValueError("assessed_at must be timezone-aware.")
         normalized_time = assessed_at.astimezone(UTC)
         selected_options = options or ReviewCostAssessmentOptions()
-        protected = set(assessment_input.protected_changed_paths)
-        changed_paths = dict.fromkeys(
-            path
-            for file in assessment_input.files
-            for path in (file.path, file.previous_path)
-            if path is not None
-        )
         classifications = {
-            path: _classify_path(path, protected)
-            for path in changed_paths
+            classification.path: tuple(classification.categories)
+            for classification in classify_review_cost_paths(
+                assessment_input.files,
+                assessment_input.protected_changed_paths,
+            )
         }
         limit = selected_options.max_evidence_items_per_signal
         validation, reducers = _validation_gaps(

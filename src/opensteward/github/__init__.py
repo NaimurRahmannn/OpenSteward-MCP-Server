@@ -82,6 +82,13 @@ from opensteward.github.installation_tokens import (
     GitHubRepositorySelection,
     GitHubTokenRepository,
 )
+from opensteward.github.maintainer_brief import (
+    GitHubMaintainerBriefError,
+    GitHubMaintainerBriefRequest,
+    GitHubMaintainerBriefResult,
+    GitHubMaintainerBriefRunner,
+    GitHubMaintainerBriefService,
+)
 from opensteward.github.models import (
     GitHubAccountType,
     GitHubInstallationRef,
@@ -143,6 +150,7 @@ from opensteward.github.review_cost import (
     GitHubReviewCostService,
 )
 from opensteward.github.runtime import (
+    LiveGitHubMaintainerBriefRunner,
     LiveGitHubPullRequestAssessmentRunner,
     LiveGitHubRelatedWorkRunner,
     LiveGitHubReviewCostRunner,
@@ -200,6 +208,11 @@ __all__ = [
     "GitHubInstallationTokenError",
     "GitHubInstallationTokenProvider",
     "GitHubInstallationTokenScope",
+    "GitHubMaintainerBriefError",
+    "GitHubMaintainerBriefRequest",
+    "GitHubMaintainerBriefResult",
+    "GitHubMaintainerBriefRunner",
+    "GitHubMaintainerBriefService",
     "GitHubJwtGenerationError",
     "GitHubPermissionLevel",
     "GitHubRepositoryRef",
@@ -272,6 +285,7 @@ __all__ = [
     "GitHubPullRequestAssessmentService",
     "GitHubPullRequestAssessmentSummary",
     "LiveGitHubPullRequestAssessmentRunner",
+    "LiveGitHubMaintainerBriefRunner",
     "LiveGitHubRelatedWorkRunner",
     "LiveGitHubReviewCostRunner",
 ]

@@ -24,6 +24,8 @@ from opensteward.review_intelligence import (
     ReviewCostChangeType,
     ReviewCostHistoricalContext,
     ReviewCostLevel,
+    ReviewCostPathCategory,
+    ReviewCostPathClassification,
     ReviewCostSignal,
     ReviewCostSignalContribution,
 )
@@ -142,6 +144,66 @@ def test_changed_file_previous_path_and_strictness() -> None:
             additions=1,
             deletions=1,
             extra=True,
+        )
+
+
+def test_path_classification_is_strict_normalized_and_ordered() -> None:
+    classification = ReviewCostPathClassification(
+        path="./src\\security\\auth.py",
+        categories=[
+            ReviewCostPathCategory.PROTECTED,
+            ReviewCostPathCategory.SECURITY_SENSITIVE,
+            ReviewCostPathCategory.PRODUCTION,
+        ],
+    )
+
+    assert classification.path == "src/security/auth.py"
+    assert classification.risk_category_count == 2
+    with pytest.raises(ValidationError):
+        ReviewCostPathClassification(
+            path="src/app.py",
+            categories=[ReviewCostPathCategory.PRODUCTION],
+            extra=True,
+        )
+    with pytest.raises(ValidationError, match="unique"):
+        ReviewCostPathClassification(
+            path="src/app.py",
+            categories=[
+                ReviewCostPathCategory.PRODUCTION,
+                ReviewCostPathCategory.PRODUCTION,
+            ],
+        )
+    with pytest.raises(ValidationError, match="exact category order"):
+        ReviewCostPathClassification(
+            path="src/security/auth.py",
+            categories=[
+                ReviewCostPathCategory.SECURITY_SENSITIVE,
+                ReviewCostPathCategory.PROTECTED,
+                ReviewCostPathCategory.PRODUCTION,
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "categories",
+    [
+        [
+            ReviewCostPathCategory.TEST,
+            ReviewCostPathCategory.PRODUCTION,
+        ],
+        [
+            ReviewCostPathCategory.DOCUMENTATION,
+            ReviewCostPathCategory.PRODUCTION,
+        ],
+    ],
+)
+def test_path_classification_rejects_conflicting_categories(
+    categories: list[ReviewCostPathCategory],
+) -> None:
+    with pytest.raises(ValidationError, match="must not both"):
+        ReviewCostPathClassification(
+            path="src/app.py",
+            categories=categories,
         )
 
 

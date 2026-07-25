@@ -20,10 +20,14 @@ from opensteward.review_intelligence.models import (
     ReviewCostHistoricalContext,
     ReviewCostLevel,
     ReviewCostPathCategory,
+    ReviewCostPathClassification,
     ReviewCostSignal,
     ReviewCostSignalContribution,
 )
-from opensteward.review_intelligence.scoring import ReviewCostAssessmentService
+from opensteward.review_intelligence.scoring import (
+    ReviewCostAssessmentService,
+    classify_review_cost_paths,
+)
 
 __all__ = [
     "MAX_REVIEW_COST_BASIS_POINTS",
@@ -46,6 +50,8 @@ __all__ = [
     "ReviewCostHistoricalContext",
     "ReviewCostLevel",
     "ReviewCostPathCategory",
+    "ReviewCostPathClassification",
     "ReviewCostSignal",
     "ReviewCostSignalContribution",
+    "classify_review_cost_paths",
 ]

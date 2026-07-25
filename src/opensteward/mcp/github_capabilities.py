@@ -3,6 +3,9 @@
 from opensteward.github import (
     GitHubContributionInputOptions,
     GitHubHistoricalKnowledgeSnapshotOptions,
+    GitHubMaintainerBriefRequest,
+    GitHubMaintainerBriefResult,
+    GitHubMaintainerBriefRunner,
     GitHubPullRequestAssessmentRequest,
     GitHubPullRequestAssessmentResult,
     GitHubPullRequestAssessmentRunner,
@@ -14,6 +17,7 @@ from opensteward.github import (
     GitHubReviewCostRequest,
     GitHubReviewCostResult,
     GitHubReviewCostRunner,
+    LiveGitHubMaintainerBriefRunner,
     LiveGitHubPullRequestAssessmentRunner,
     LiveGitHubRelatedWorkRunner,
     LiveGitHubReviewCostRunner,
@@ -32,6 +36,10 @@ _assessment_runner: (
 _related_work_runner: GitHubRelatedWorkRunner = LiveGitHubRelatedWorkRunner()
 
 _review_cost_runner: GitHubReviewCostRunner = LiveGitHubReviewCostRunner()
+
+_maintainer_brief_runner: GitHubMaintainerBriefRunner = (
+    LiveGitHubMaintainerBriefRunner()
+)
 
 
 async def assess_pull_request(
@@ -171,3 +179,62 @@ async def assess_review_cost(
         ),
     )
     return await _review_cost_runner.assess(request)
+
+
+async def get_maintainer_brief(
+    installation_id: int,
+    repository: GitHubRepositoryRef,
+    pull_number: int,
+    policy_path: str = DEFAULT_POLICY_FILENAME,
+    explicit_categories: list[ContributionCategory] | None = None,
+    conversion_options: GitHubContributionInputOptions | None = None,
+    snapshot_options: GitHubHistoricalKnowledgeSnapshotOptions | None = None,
+    related_work_options: KnowledgeRelatedWorkOptions | None = None,
+    review_cost_options: ReviewCostAssessmentOptions | None = None,
+) -> GitHubMaintainerBriefResult:
+    """Build a deterministic, read-only maintainer brief for a GitHub pull request.
+
+    The tool combines related historical work with contribution readiness,
+    repository policy, review cost, and maintainer routing. It recommends whether
+    author action or maintainer review should happen next, identifies security,
+    database, deployment, architecture, or general routes, provides deterministic
+    recommended actions, and reports incomplete evidence and coverage.
+
+    Authentication uses a GitHub App installation. The tool is read-only: it
+    does not comment, label, approve, reject, request changes, close, merge, or
+    modify repository content. It does not decide whether the pull request should
+    merge, evaluate contributor skill or trustworthiness, or use an LLM.
+    """
+
+    request = GitHubMaintainerBriefRequest(
+        installation_id=installation_id,
+        repository=repository,
+        pull_number=pull_number,
+        policy_path=policy_path,
+        explicit_categories=(
+            list(explicit_categories)
+            if explicit_categories is not None
+            else []
+        ),
+        conversion_options=(
+            conversion_options
+            if conversion_options is not None
+            else GitHubContributionInputOptions()
+        ),
+        snapshot_options=(
+            snapshot_options
+            if snapshot_options is not None
+            else GitHubHistoricalKnowledgeSnapshotOptions()
+        ),
+        related_work_options=(
+            related_work_options
+            if related_work_options is not None
+            else KnowledgeRelatedWorkOptions()
+        ),
+        review_cost_options=(
+            review_cost_options
+            if review_cost_options is not None
+            else ReviewCostAssessmentOptions()
+        ),
+    )
+    return await _maintainer_brief_runner.build(request)

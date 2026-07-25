@@ -9,6 +9,8 @@ from mcp.shared.memory import create_connected_server_and_client_session
 
 import opensteward.mcp.github_capabilities as github_capabilities
 from opensteward.github import (
+    GitHubMaintainerBriefRequest,
+    GitHubMaintainerBriefResult,
     GitHubPullRequestAssessmentRequest,
     GitHubPullRequestAssessmentResult,
     GitHubRelatedWorkRequest,
@@ -29,6 +31,7 @@ from opensteward.knowledge import (
     KnowledgeSourceKind,
 )
 from opensteward.mcp.server import mcp
+from tests.github.test_maintainer_brief import completed_maintainer_brief_result
 from tests.github.test_review_cost import (
     assessment_result,
     completed_review_cost_result,
@@ -154,6 +157,21 @@ class StaticReviewCostRunner:
         return self.result
 
 
+class StaticMaintainerBriefRunner:
+    """Return one prepared maintainer brief through the registered tool."""
+
+    def __init__(self, result: GitHubMaintainerBriefResult) -> None:
+        self.result = result
+        self.calls: list[GitHubMaintainerBriefRequest] = []
+
+    async def build(
+        self,
+        request: GitHubMaintainerBriefRequest,
+    ) -> GitHubMaintainerBriefResult:
+        self.calls.append(request)
+        return self.result
+
+
 @pytest.mark.anyio
 async def test_mcp_server_exposes_expected_tools(
     client_session: ClientSession,
@@ -171,6 +189,7 @@ async def test_mcp_server_exposes_expected_tools(
     assert "assess_pull_request" in tool_names
     assert "find_related_work" in tool_names
     assert "assess_review_cost" in tool_names
+    assert "get_maintainer_brief" in tool_names
 
     resources = await client_session.list_resources()
     assert any(
@@ -468,3 +487,101 @@ async def test_estimate_review_cost_tool(
     assert data["level"] == "high"
     assert len(data["contributions"]) == 7
     assert "substantial maintainer attention" in data["summary"]
+
+
+@pytest.mark.anyio
+async def test_get_maintainer_brief_schema_is_structured(
+    client_session: ClientSession,
+) -> None:
+    result = await client_session.list_tools()
+    tool = next(
+        tool for tool in result.tools if tool.name == "get_maintainer_brief"
+    )
+
+    assert set(tool.inputSchema["properties"]) == {
+        "installation_id",
+        "repository",
+        "pull_number",
+        "policy_path",
+        "explicit_categories",
+        "conversion_options",
+        "snapshot_options",
+        "related_work_options",
+        "review_cost_options",
+    }
+    assert tool.outputSchema is not None
+    assert set(tool.outputSchema["properties"]) == {
+        "repository",
+        "pull_request",
+        "pull_request_assessment",
+        "related_work",
+        "review_cost",
+        "brief",
+        "warnings",
+        "recommendation",
+        "routes",
+        "review_cost_score",
+        "review_cost_level",
+        "returned_related_work",
+        "complete",
+    }
+
+
+@pytest.mark.anyio
+async def test_get_maintainer_brief_in_memory_invocation_is_redacted(
+    client_session: ClientSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = await completed_maintainer_brief_result()
+    runner = StaticMaintainerBriefRunner(expected)
+    monkeypatch.setattr(
+        github_capabilities,
+        "_maintainer_brief_runner",
+        runner,
+    )
+
+    result = await client_session.call_tool(
+        "get_maintainer_brief",
+        {
+            "installation_id": 73,
+            "repository": {
+                "owner": "acme",
+                "name": "framework",
+            },
+            "pull_number": 17,
+        },
+    )
+
+    assert result.isError is False
+    assert result.structuredContent is not None
+    data = result.structuredContent
+    assert data["pull_request"]["title"]
+    assert data["brief"]["readiness"]
+    assert data["brief"]["related_work"]["matches"]
+    assert data["brief"]["review_cost"]["contributions"]
+    assert data["recommendation"] == "author_action_first"
+    assert data["routes"] == ["security", "architecture"]
+    assert data["brief"]["attention"]["reasons"]
+    assert data["brief"]["recommended_actions"]
+    assert "warnings" in data
+    assert "complete" in data
+    assessment = data["pull_request_assessment"]
+    assert set(assessment) == {
+        "read_only",
+        "summary",
+        "policy",
+        "conversion",
+        "packet",
+        "evaluation",
+    }
+    serialized = str(data).casefold()
+    for secret in (
+        "installation_id",
+        "installation_token",
+        "private_key",
+        "token_scope",
+        "authorization",
+    ):
+        assert secret not in serialized
+    assert len(runner.calls) == 1
+    assert runner.calls[0].installation_id == 73
