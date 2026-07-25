@@ -1,6 +1,9 @@
 """Live GitHub runtime wiring for read-only capabilities."""
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import httpx
 
@@ -63,19 +66,98 @@ SettingsFactory = Callable[
 ]
 
 
-class LiveGitHubPullRequestAssessmentRunner:
-    """Build live GitHub dependencies and assess one pull request."""
+@dataclass(frozen=True, slots=True)
+class _GitHubRuntimeResources:
+    """Reusable GitHub transport and installation-token provider."""
+
+    settings: GitHubAppSettings
+    http_client: httpx.AsyncClient
+    token_provider: GitHubInstallationTokenProvider
+
+
+class _SharedGitHubRuntime:
+    """Lazily own reusable GitHub resources until application shutdown."""
+
+    def __init__(self) -> None:
+        self._resources: _GitHubRuntimeResources | None = None
+        self._lock = asyncio.Lock()
+
+    @asynccontextmanager
+    async def use(
+        self,
+        settings: GitHubAppSettings,
+    ) -> AsyncIterator[_GitHubRuntimeResources]:
+        """Yield shared resources without ending their process lifetime."""
+
+        async with self._lock:
+            if self._resources is None:
+                http_client = httpx.AsyncClient(
+                    follow_redirects=False,
+                )
+                token_provider = GitHubInstallationTokenProvider(
+                    settings=settings,
+                    client=http_client,
+                )
+                self._resources = _GitHubRuntimeResources(
+                    settings=settings,
+                    http_client=http_client,
+                    token_provider=token_provider,
+                )
+            elif self._resources.settings != settings:
+                raise RuntimeError(
+                    "GitHub runtime settings changed after initialization."
+                )
+
+            resources = self._resources
+
+        yield resources
+
+    async def aclose(self) -> None:
+        """Clear cached credentials and close the shared HTTP transport."""
+
+        async with self._lock:
+            resources = self._resources
+            self._resources = None
+
+            if resources is None:
+                return
+
+            resources.token_provider.clear()
+            await resources.http_client.aclose()
+
+
+_shared_github_runtime = _SharedGitHubRuntime()
+
+
+async def close_live_github_runtime() -> None:
+    """Close process-level GitHub resources during application shutdown."""
+
+    await _shared_github_runtime.aclose()
+
+
+class _LiveGitHubRunner:
+    """Provide one persistent GitHub runtime to a live capability runner."""
 
     def __init__(
         self,
         *,
-        settings_factory: SettingsFactory = (
-            get_github_settings
-        ),
+        settings_factory: SettingsFactory = get_github_settings,
     ) -> None:
-        self._settings_factory = (
-            settings_factory
+        self._settings_factory = settings_factory
+        self._github_runtime = (
+            _shared_github_runtime
+            if settings_factory is get_github_settings
+            else _SharedGitHubRuntime()
         )
+
+    async def aclose(self) -> None:
+        """Close resources owned by this runner."""
+
+        await self._github_runtime.aclose()
+
+
+class LiveGitHubPullRequestAssessmentRunner(_LiveGitHubRunner):
+    """Build live GitHub dependencies and assess one pull request."""
 
     async def assess(
         self,
@@ -112,15 +194,9 @@ class LiveGitHubPullRequestAssessmentRunner:
             )
         )
 
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-        ) as http_client:
-            token_provider = (
-                GitHubInstallationTokenProvider(
-                    settings=settings,
-                    client=http_client,
-                )
-            )
+        async with self._github_runtime.use(settings) as runtime:
+            http_client = runtime.http_client
+            token_provider = runtime.token_provider
 
             rest_client = GitHubRestClient(
                 settings=settings,
@@ -160,15 +236,8 @@ class LiveGitHubPullRequestAssessmentRunner:
             )
 
 
-class LiveGitHubRelatedWorkRunner:
+class LiveGitHubRelatedWorkRunner(_LiveGitHubRunner):
     """Build live GitHub dependencies and run one related-work search."""
-
-    def __init__(
-        self,
-        *,
-        settings_factory: SettingsFactory = get_github_settings,
-    ) -> None:
-        self._settings_factory = settings_factory
 
     async def find(
         self,
@@ -194,13 +263,9 @@ class LiveGitHubRelatedWorkRunner:
             },
         )
 
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-        ) as http_client:
-            token_provider = GitHubInstallationTokenProvider(
-                settings=settings,
-                client=http_client,
-            )
+        async with self._github_runtime.use(settings) as runtime:
+            http_client = runtime.http_client
+            token_provider = runtime.token_provider
             rest_client = GitHubRestClient(
                 settings=settings,
                 token_provider=token_provider,
@@ -231,15 +296,8 @@ class LiveGitHubRelatedWorkRunner:
             return await related_work_service.find(request)
 
 
-class LiveGitHubReviewCostRunner:
+class LiveGitHubReviewCostRunner(_LiveGitHubRunner):
     """Build one shared live runtime for evidence-derived review cost."""
-
-    def __init__(
-        self,
-        *,
-        settings_factory: SettingsFactory = get_github_settings,
-    ) -> None:
-        self._settings_factory = settings_factory
 
     async def assess(
         self,
@@ -264,13 +322,9 @@ class LiveGitHubReviewCostRunner:
                 "issues": GitHubPermissionLevel.READ,
             },
         )
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-        ) as http_client:
-            token_provider = GitHubInstallationTokenProvider(
-                settings=settings,
-                client=http_client,
-            )
+        async with self._github_runtime.use(settings) as runtime:
+            http_client = runtime.http_client
+            token_provider = runtime.token_provider
             rest_client = GitHubRestClient(
                 settings=settings,
                 token_provider=token_provider,
@@ -319,15 +373,8 @@ class LiveGitHubReviewCostRunner:
             return await review_cost_service.assess(request)
 
 
-class LiveGitHubMaintainerBriefRunner:
+class LiveGitHubMaintainerBriefRunner(_LiveGitHubRunner):
     """Build one shared live runtime for a structured maintainer brief."""
-
-    def __init__(
-        self,
-        *,
-        settings_factory: SettingsFactory = get_github_settings,
-    ) -> None:
-        self._settings_factory = settings_factory
 
     async def build(
         self,
@@ -352,13 +399,9 @@ class LiveGitHubMaintainerBriefRunner:
                 "issues": GitHubPermissionLevel.READ,
             },
         )
-        async with httpx.AsyncClient(
-            follow_redirects=False,
-        ) as http_client:
-            token_provider = GitHubInstallationTokenProvider(
-                settings=settings,
-                client=http_client,
-            )
+        async with self._github_runtime.use(settings) as runtime:
+            http_client = runtime.http_client
+            token_provider = runtime.token_provider
             rest_client = GitHubRestClient(
                 settings=settings,
                 token_provider=token_provider,

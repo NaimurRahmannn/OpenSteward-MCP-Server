@@ -71,6 +71,17 @@ class FakeAsyncClient:
     async def __aexit__(self, *args: object) -> None:
         self.closed = True
 
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeTokenProvider:
+    def __init__(self) -> None:
+        self.cleared = False
+
+    def clear(self) -> None:
+        self.cleared = True
+
 
 class FakeGitHubMaintainerBriefService:
     instances: list["FakeGitHubMaintainerBriefService"] = []
@@ -110,6 +121,7 @@ def install_doubles(
     )
     records: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
     objects = {name: object() for name in names}
+    objects["token"] = FakeTokenProvider()
     FakeAsyncClient.instances = []
     FakeGitHubMaintainerBriefService.instances = []
     FakeGitHubMaintainerBriefService.outcome = object()
@@ -171,17 +183,18 @@ async def test_runtime_builds_one_shared_read_only_graph_and_delegates_once(
 ) -> None:
     records, objects = install_doubles(monkeypatch)
     selected = request()
-
-    result = await LiveGitHubMaintainerBriefRunner(
+    runner = LiveGitHubMaintainerBriefRunner(
         settings_factory=configured_settings
-    ).build(selected)
+    )
+
+    result = await runner.build(selected)
 
     assert result is FakeGitHubMaintainerBriefService.outcome
     assert len(FakeAsyncClient.instances) == 1
     client = FakeAsyncClient.instances[0]
     assert client.kwargs == {"follow_redirects": False}
-    assert client.entered is True
-    assert client.closed is True
+    assert client.entered is False
+    assert client.closed is False
     assert records["token"] == [
         {"settings": configured_settings(), "client": client}
     ]
@@ -239,22 +252,32 @@ async def test_runtime_builds_one_shared_read_only_graph_and_delegates_once(
     }
     assert final.calls == [selected]
 
+    await runner.aclose()
+
+    assert client.closed is True
+    assert objects["token"].cleared is True
+
 
 class SentinelRuntimeError(RuntimeError):
     """Distinct final-service failure."""
 
 
 @pytest.mark.asyncio
-async def test_http_client_closes_after_delegation_failure(
+async def test_runtime_stays_open_after_service_failure_until_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_doubles(monkeypatch)
     FakeGitHubMaintainerBriefService.error = SentinelRuntimeError("failed")
+    runner = LiveGitHubMaintainerBriefRunner(
+        settings_factory=configured_settings
+    )
 
     with pytest.raises(SentinelRuntimeError, match="failed"):
-        await LiveGitHubMaintainerBriefRunner(
-            settings_factory=configured_settings
-        ).build(request())
+        await runner.build(request())
 
     assert len(FakeGitHubMaintainerBriefService.instances[0].calls) == 1
+    assert FakeAsyncClient.instances[0].closed is False
+
+    await runner.aclose()
+
     assert FakeAsyncClient.instances[0].closed is True

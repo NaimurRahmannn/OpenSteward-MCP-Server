@@ -62,7 +62,7 @@ def unconfigured_settings() -> GitHubAppSettings:
 
 
 class FakeAsyncClient:
-    """Record HTTP-client construction and context closure."""
+    """Record HTTP-client construction and explicit closure."""
 
     instances: list["FakeAsyncClient"] = []
 
@@ -78,6 +78,19 @@ class FakeAsyncClient:
 
     async def __aexit__(self, *args: object) -> None:
         self.closed = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeTokenProvider:
+    """Record installation-token cache clearing."""
+
+    def __init__(self) -> None:
+        self.cleared = False
+
+    def clear(self) -> None:
+        self.cleared = True
 
 
 class FakeGitHubReviewCostService:
@@ -126,6 +139,7 @@ def install_runtime_doubles(
     monkeypatch.setattr(runtime_module.httpx, "AsyncClient", FakeAsyncClient)
 
     objects = {name: object() for name in names}
+    objects["token"] = FakeTokenProvider()
 
     def constructor(name: str):
         def construct(**kwargs: Any) -> object:
@@ -186,8 +200,8 @@ async def test_runtime_builds_one_shared_read_only_graph_and_delegates_once(
     assert len(FakeAsyncClient.instances) == 1
     http_client = FakeAsyncClient.instances[0]
     assert http_client.kwargs == {"follow_redirects": False}
-    assert http_client.entered is True
-    assert http_client.closed is True
+    assert http_client.entered is False
+    assert http_client.closed is False
 
     assert records["token"] == [
         {"settings": configured_settings(), "client": http_client}
@@ -245,13 +259,18 @@ async def test_runtime_builds_one_shared_read_only_graph_and_delegates_once(
     }
     assert final_service.calls == [selected_request]
 
+    await runner.aclose()
+
+    assert http_client.closed is True
+    assert objects["token"].cleared is True
+
 
 class SentinelRuntimeError(RuntimeError):
     """Distinct final-service failure."""
 
 
 @pytest.mark.asyncio
-async def test_http_context_closes_when_delegated_service_fails(
+async def test_runtime_stays_open_after_service_failure_until_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_runtime_doubles(monkeypatch)
@@ -262,4 +281,8 @@ async def test_http_context_closes_when_delegated_service_fails(
         await runner.assess(request())
 
     assert len(FakeGitHubReviewCostService.instances[0].calls) == 1
+    assert FakeAsyncClient.instances[0].closed is False
+
+    await runner.aclose()
+
     assert FakeAsyncClient.instances[0].closed is True

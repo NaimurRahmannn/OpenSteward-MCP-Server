@@ -64,7 +64,7 @@ def unconfigured_settings() -> GitHubAppSettings:
 
 
 class FakeAsyncClient:
-    """Record async HTTP-client construction and context closure."""
+    """Record async HTTP-client construction and explicit closure."""
 
     instances: list["FakeAsyncClient"] = []
 
@@ -80,6 +80,19 @@ class FakeAsyncClient:
 
     async def __aexit__(self, *args: object) -> None:
         self.closed = True
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeTokenProvider:
+    """Record installation-token cache clearing."""
+
+    def __init__(self) -> None:
+        self.cleared = False
+
+    def clear(self) -> None:
+        self.cleared = True
 
 
 class FakeGitHubRelatedWorkService:
@@ -129,7 +142,7 @@ def install_runtime_doubles(
 
         return construct
 
-    token_provider = object()
+    token_provider = FakeTokenProvider()
     rest_client = object()
     historical = object()
     paths = object()
@@ -220,8 +233,8 @@ async def test_configured_runtime_builds_exact_read_only_graph_and_delegates_onc
     assert len(FakeAsyncClient.instances) == 1
     http_client = FakeAsyncClient.instances[0]
     assert http_client.kwargs == {"follow_redirects": False}
-    assert http_client.entered is True
-    assert http_client.closed is True
+    assert http_client.entered is False
+    assert http_client.closed is False
 
     assert len(records["token"]) == 1
     assert records["token"][0] == {
@@ -266,13 +279,47 @@ async def test_configured_runtime_builds_exact_read_only_graph_and_delegates_onc
     assert service.kwargs["related_work_finder"] is objects["knowledge"]
     assert service.calls == [selected_request]
 
+    await runner.aclose()
+
+    assert http_client.closed is True
+    assert objects["token_provider"].cleared is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_reuses_client_and_token_provider_between_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    records, objects = install_runtime_doubles(monkeypatch)
+    runner = LiveGitHubRelatedWorkRunner(
+        settings_factory=configured_settings
+    )
+
+    first = await runner.find(request())
+    second = await runner.find(request())
+
+    assert first is FakeGitHubRelatedWorkService.outcome
+    assert second is FakeGitHubRelatedWorkService.outcome
+    assert len(FakeAsyncClient.instances) == 1
+    assert FakeAsyncClient.instances[0].closed is False
+    assert len(records["token"]) == 1
+    assert len(records["rest"]) == 2
+    assert all(
+        entry["token_provider"] is objects["token_provider"]
+        for entry in records["rest"]
+    )
+
+    await runner.aclose()
+
+    assert FakeAsyncClient.instances[0].closed is True
+    assert objects["token_provider"].cleared is True
+
 
 class SentinelRuntimeError(RuntimeError):
     """Distinct final-service failure."""
 
 
 @pytest.mark.asyncio
-async def test_http_context_closes_when_delegated_service_fails(
+async def test_runtime_stays_open_after_service_failure_until_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     install_runtime_doubles(monkeypatch)
@@ -285,4 +332,8 @@ async def test_http_context_closes_when_delegated_service_fails(
         await runner.find(request())
 
     assert len(FakeGitHubRelatedWorkService.instances[0].calls) == 1
+    assert FakeAsyncClient.instances[0].closed is False
+
+    await runner.aclose()
+
     assert FakeAsyncClient.instances[0].closed is True

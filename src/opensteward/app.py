@@ -8,6 +8,7 @@ from fastapi import FastAPI, Response, status
 from pydantic import BaseModel
 
 from opensteward import __version__
+from opensteward.github.runtime import close_live_github_runtime
 from opensteward.mcp.server import mcp
 from opensteward.readiness import (
     ReadinessChecks,
@@ -43,8 +44,11 @@ mcp_http_app = mcp.streamable_http_app()
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Start and stop application-level services."""
 
-    async with mcp.session_manager.run():
-        yield
+    try:
+        async with mcp.session_manager.run():
+            yield
+    finally:
+        await close_live_github_runtime()
 
 
 def create_app() -> FastAPI:
