@@ -26,6 +26,7 @@ def test_github_settings_are_optional() -> None:
     assert settings.api_url == "https://api.github.com"
     assert settings.api_version == "2026-03-10"
     assert settings.user_agent == "OpenSteward/0.1.0"
+    assert settings.retry_time_budget_seconds == 120
 
 
 def test_inline_private_key_is_loaded() -> None:
@@ -211,3 +212,28 @@ def test_invalid_api_versions_are_rejected(
             _env_file=None,
             api_version=api_version,
         )
+
+
+@pytest.mark.parametrize(
+    "retry_time_budget_seconds",
+    [-1, 3_601],
+)
+def test_invalid_retry_time_budgets_are_rejected(
+    retry_time_budget_seconds: float,
+) -> None:
+    with pytest.raises(ValidationError):
+        GitHubAppSettings(
+            _env_file=None,
+            retry_time_budget_seconds=(
+                retry_time_budget_seconds
+            ),
+        )
+
+
+def test_zero_retry_time_budget_is_supported() -> None:
+    settings = GitHubAppSettings(
+        _env_file=None,
+        retry_time_budget_seconds=0,
+    )
+
+    assert settings.retry_time_budget_seconds == 0

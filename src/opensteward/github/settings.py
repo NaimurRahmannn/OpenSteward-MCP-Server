@@ -65,6 +65,12 @@ class GitHubAppSettings(BaseSettings):
         le=120,
     )
 
+    retry_time_budget_seconds: float = Field(
+        default=120,
+        ge=0,
+        le=3_600,
+    )
+
     @field_validator("api_url")
     @classmethod
     def validate_api_url(

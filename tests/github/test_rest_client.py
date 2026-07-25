@@ -46,21 +46,28 @@ class RepositoryPayload(BaseModel):
     private: bool
 
 
-def create_settings() -> GitHubAppSettings:
+def create_settings(
+    **updates: Any,
+) -> GitHubAppSettings:
     """Create GitHub settings for REST client tests."""
 
-    return GitHubAppSettings(
-        _env_file=None,
-        app_id=123456,
-        private_key=(
+    values: dict[str, Any] = {
+        "_env_file": None,
+        "app_id": 123456,
+        "private_key": (
             "-----BEGIN RSA PRIVATE KEY-----\n"
             "test\n"
             "-----END RSA PRIVATE KEY-----"
         ),
-        api_url="https://api.github.test",
-        api_version="2026-03-10",
-        user_agent="OpenSteward/Test",
-        request_timeout_seconds=10,
+        "api_url": "https://api.github.test",
+        "api_version": "2026-03-10",
+        "user_agent": "OpenSteward/Test",
+        "request_timeout_seconds": 10,
+    }
+    values.update(updates)
+
+    return GitHubAppSettings(
+        **values,
     )
 
 
@@ -660,6 +667,151 @@ def test_retry_after_supports_http_date() -> None:
         )
         == 12
     )
+
+
+def test_retry_delay_prefers_retry_after_without_thirty_second_cap() -> None:
+    reset_epoch = int(
+        (FIXED_NOW + timedelta(seconds=10)).timestamp()
+    )
+    response = httpx.Response(
+        status_code=403,
+        headers={
+            "Retry-After": "75",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(reset_epoch),
+        },
+        json={"message": "API rate limit exceeded"},
+    )
+
+    assert (
+        rest_client_module._retry_delay_seconds(
+            1,
+            response=response,
+            now=FIXED_NOW,
+        )
+        == 75.0
+    )
+
+
+def test_retry_delay_uses_primary_rate_limit_reset_deadline() -> None:
+    reset_epoch = int(
+        (FIXED_NOW + timedelta(seconds=47)).timestamp()
+    )
+    response = httpx.Response(
+        status_code=403,
+        headers={
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(reset_epoch),
+        },
+        json={"message": "API rate limit exceeded"},
+    )
+
+    assert (
+        rest_client_module._retry_delay_seconds(
+            1,
+            response=response,
+            now=FIXED_NOW,
+        )
+        == 47.0
+    )
+
+
+@pytest.mark.anyio
+async def test_client_waits_until_primary_rate_limit_reset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+    reset_epoch = int(
+        (FIXED_NOW + timedelta(seconds=47)).timestamp()
+    )
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module,
+        "_utc_now",
+        lambda: FIXED_NOW,
+    )
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+
+        if request_count == 1:
+            return httpx.Response(
+                status_code=403,
+                headers={
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset_epoch),
+                },
+                json={"message": "API rate limit exceeded"},
+            )
+
+        return httpx.Response(status_code=200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        response = await GitHubRestClient(
+            settings=create_settings(),
+            token_provider=FakeTokenProvider(),
+            client=http_client,
+            installation_id=987654,
+        ).get_json("/repos/acme/framework")
+
+    assert response.status_code == 200
+    assert request_count == 2
+    assert delays == [47.0]
+
+
+@pytest.mark.anyio
+async def test_retry_budget_rejects_server_wait_beyond_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            status_code=429,
+            headers={"Retry-After": "70"},
+            json={"message": "API rate limit exceeded"},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+    ) as http_client:
+        with pytest.raises(GitHubRestResponseError) as error_info:
+            await GitHubRestClient(
+                settings=create_settings(
+                    retry_time_budget_seconds=120,
+                ),
+                token_provider=FakeTokenProvider(),
+                client=http_client,
+                installation_id=987654,
+            ).get_json("/repos/acme/framework")
+
+    assert error_info.value.rate_limited is True
+    assert request_count == 2
+    assert delays == [70.0]
 
 
 @pytest.mark.anyio

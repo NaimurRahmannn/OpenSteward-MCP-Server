@@ -44,6 +44,12 @@ QueryParams = Mapping[
 ]
 
 
+def _utc_now() -> datetime:
+    """Return the current UTC time through a patchable boundary."""
+
+    return datetime.now(UTC)
+
+
 class InstallationTokenProvider(Protocol):
     """Behavior required from an installation-token provider."""
 
@@ -195,7 +201,7 @@ def _parse_retry_after_seconds(
     if retry_at.tzinfo is None:
         retry_at = retry_at.replace(tzinfo=UTC)
 
-    current_time = now or datetime.now(UTC)
+    current_time = now or _utc_now()
     remaining_seconds = (
         retry_at.astimezone(UTC)
         - current_time.astimezone(UTC)
@@ -238,14 +244,16 @@ def _parse_rate_limit_metadata(
     ):
         return None
 
-    reset_at = (
-        datetime.fromtimestamp(
-            reset_epoch,
-            tz=UTC,
-        )
-        if reset_epoch is not None
-        else None
-    )
+    reset_at = None
+
+    if reset_epoch is not None:
+        try:
+            reset_at = datetime.fromtimestamp(
+                reset_epoch,
+                tz=UTC,
+            )
+        except (OSError, OverflowError, ValueError):
+            reset_at = None
 
     return GitHubRateLimitMetadata(
         limit=limit,
@@ -350,25 +358,42 @@ def _retry_delay_seconds(
     retry_number: int,
     *,
     response: httpx.Response | None = None,
+    now: datetime | None = None,
 ) -> float:
-    """Calculate a bounded retry delay.
+    """Calculate a server-directed or jittered retry delay.
 
-    Retry-After takes precedence when GitHub supplies it. Otherwise,
-    full jitter is applied to exponential backoff.
+    Retry-After takes precedence when GitHub supplies it. A primary
+    rate-limit reset deadline is used next. Otherwise, full jitter is
+    applied to bounded exponential backoff.
     """
 
     if response is not None:
+        current_time = now or _utc_now()
         retry_after_seconds = (
             _parse_retry_after_seconds(
-                response.headers.get("retry-after")
+                response.headers.get("retry-after"),
+                now=current_time,
             )
         )
 
         if retry_after_seconds is not None:
-            return min(
-                float(retry_after_seconds),
-                MAX_RETRY_DELAY_SECONDS,
-            )
+            return float(retry_after_seconds)
+
+        if _is_rate_limited_response(response):
+            rate_limit = _parse_rate_limit_metadata(response)
+
+            if (
+                rate_limit is not None
+                and rate_limit.reset_at is not None
+            ):
+                remaining_seconds = (
+                    rate_limit.reset_at
+                    - current_time.astimezone(UTC)
+                ).total_seconds()
+
+                return float(
+                    max(0, ceil(remaining_seconds))
+                )
 
     exponential_ceiling = min(
         INITIAL_RETRY_DELAY_SECONDS
@@ -659,6 +684,7 @@ class GitHubRestClient:
         )
 
         transient_retries = 0
+        retry_wait_seconds = 0.0
         token_refreshed = False
 
         while True:
@@ -676,12 +702,26 @@ class GitHubRestClient:
                 ):
                     raise
 
+                retry_delay = _retry_delay_seconds(
+                    transient_retries + 1
+                )
+                remaining_retry_budget = max(
+                    0.0,
+                    (
+                        self._settings
+                        .retry_time_budget_seconds
+                        - retry_wait_seconds
+                    ),
+                )
+
+                if retry_delay > remaining_retry_budget:
+                    raise
+
                 transient_retries += 1
+                retry_wait_seconds += retry_delay
 
                 await asyncio.sleep(
-                    _retry_delay_seconds(
-                        transient_retries
-                    )
+                    retry_delay
                 )
 
                 continue
@@ -709,13 +749,27 @@ class GitHubRestClient:
                 and transient_retries
                 < MAX_TRANSIENT_RETRIES
             ):
+                retry_delay = _retry_delay_seconds(
+                    transient_retries + 1,
+                    response=response,
+                )
+                remaining_retry_budget = max(
+                    0.0,
+                    (
+                        self._settings
+                        .retry_time_budget_seconds
+                        - retry_wait_seconds
+                    ),
+                )
+
+                if retry_delay > remaining_retry_budget:
+                    break
+
                 transient_retries += 1
+                retry_wait_seconds += retry_delay
 
                 await asyncio.sleep(
-                    _retry_delay_seconds(
-                        transient_retries,
-                        response=response,
-                    )
+                    retry_delay
                 )
 
                 continue
