@@ -12,6 +12,9 @@ pull_requests:
 
   preferred_maximum_diff_lines: 500
 
+  # Exact GitHub check-run names that must complete successfully.
+  required_checks: []
+
 protected_paths:
   - pattern: "src/security/**"
     risk: critical

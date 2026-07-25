@@ -18,6 +18,7 @@ def test_repository_policy_has_safe_defaults() -> None:
         policy.pull_requests.preferred_maximum_diff_lines
         == 500
     )
+    assert policy.pull_requests.required_checks == []
 
     assert policy.pull_requests.tests_required_for == [
         ContributionCategory.BUG_FIX,
@@ -54,6 +55,10 @@ def test_repository_policy_accepts_complete_configuration() -> None:
                     "public_api",
                 ],
                 "preferred_maximum_diff_lines": 750,
+                "required_checks": [
+                    "tests",
+                    "lint",
+                ],
             },
             "protected_paths": [
                 {
@@ -85,6 +90,10 @@ def test_repository_policy_accepts_complete_configuration() -> None:
     )
 
     assert policy.pull_requests.preferred_maximum_diff_lines == 750
+    assert policy.pull_requests.required_checks == [
+        "tests",
+        "lint",
+    ]
     assert policy.protected_paths[0].risk == RiskLevel.CRITICAL
     assert policy.protected_paths[1].risk == RiskLevel.LOW
     assert policy.review.required_approvals.security == 3
@@ -159,6 +168,45 @@ def test_policy_rejects_duplicate_contribution_categories() -> None:
                     "tests_required_for": [
                         "bug_fix",
                         "bug_fix",
+                    ]
+                }
+            }
+        )
+
+
+def test_policy_rejects_duplicate_required_check_names() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="must not contain duplicates",
+    ):
+        RepositoryPolicy.model_validate(
+            {
+                "pull_requests": {
+                    "required_checks": [
+                        "tests",
+                        "tests",
+                    ]
+                }
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "required_check",
+    [
+        "",
+        "x" * 201,
+    ],
+)
+def test_policy_rejects_invalid_required_check_names(
+    required_check: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        RepositoryPolicy.model_validate(
+            {
+                "pull_requests": {
+                    "required_checks": [
+                        required_check,
                     ]
                 }
             }

@@ -36,6 +36,9 @@ def test_parse_valid_policy() -> None:
           linked_issue_required_for:
             - public_api
             - architecture
+          required_checks:
+            - tests
+            - lint
           preferred_maximum_diff_lines: 750
 
         protected_paths:
@@ -53,6 +56,10 @@ def test_parse_valid_policy() -> None:
     assert policy.pull_requests.linked_issue_required_for == [
         ContributionCategory.PUBLIC_API,
         ContributionCategory.ARCHITECTURE,
+    ]
+    assert policy.pull_requests.required_checks == [
+        "tests",
+        "lint",
     ]
 
     assert policy.protected_paths[0].pattern == "src/security/**"

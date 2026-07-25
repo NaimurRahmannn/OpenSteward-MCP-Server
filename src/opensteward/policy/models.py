@@ -1,7 +1,7 @@
 """Typed repository policy models for OpenSteward."""
 
 from enum import StrEnum
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -48,6 +48,17 @@ class ContributionCategory(StrEnum):
     DATABASE_MIGRATION = "database_migration"
     SECURITY = "security"
     DEPENDENCY_ADDITION = "dependency_addition"
+
+
+RequiredCheckName = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=200,
+    ),
+]
+
+
 class PullRequestPolicy(StrictPolicyModel):
     """Rules applied to incoming pull requests."""
 
@@ -70,6 +81,11 @@ class PullRequestPolicy(StrictPolicyModel):
         le=100_000,
     )
 
+    required_checks: list[RequiredCheckName] = Field(
+        default_factory=list,
+        max_length=100,
+    )
+
     @field_validator(
         "linked_issue_required_for",
         "tests_required_for",
@@ -87,6 +103,21 @@ class PullRequestPolicy(StrictPolicyModel):
             )
 
         return categories
+
+    @field_validator("required_checks")
+    @classmethod
+    def reject_duplicate_required_checks(
+        cls,
+        check_names: list[str],
+    ) -> list[str]:
+        """Require unambiguous exact GitHub check-run names."""
+
+        if len(check_names) != len(set(check_names)):
+            raise ValueError(
+                "Required check names must not contain duplicates."
+            )
+
+        return check_names
 
 
 class ProtectedPathRule(StrictPolicyModel):

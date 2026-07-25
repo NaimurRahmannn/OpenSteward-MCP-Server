@@ -31,6 +31,11 @@ from opensteward.github.historical_snapshot import (
     GitHubHistoricalKnowledgeSnapshotOptions,
 )
 from opensteward.github.models import GitHubRepositoryRef, StrictGitHubModel
+from opensteward.github.pull_requests import (
+    GitHubCheckRun,
+    GitHubCheckRunConclusion,
+    GitHubCheckRunStatus,
+)
 from opensteward.github.related_work import (
     GitHubRelatedWorkQuery,
     GitHubRelatedWorkRequest,
@@ -65,6 +70,20 @@ from opensteward.review_intelligence import (
 )
 
 DEFAULT_REVIEW_COST_PREFERRED_DIFF_SIZE = 700
+
+_PASSED_REQUIRED_CHECK_CONCLUSIONS = {
+    GitHubCheckRunConclusion.SUCCESS,
+    GitHubCheckRunConclusion.NEUTRAL,
+    GitHubCheckRunConclusion.SKIPPED,
+}
+
+_FAILED_REQUIRED_CHECK_CONCLUSIONS = {
+    GitHubCheckRunConclusion.ACTION_REQUIRED,
+    GitHubCheckRunConclusion.CANCELLED,
+    GitHubCheckRunConclusion.FAILURE,
+    GitHubCheckRunConclusion.STALE,
+    GitHubCheckRunConclusion.TIMED_OUT,
+}
 
 
 class GitHubReviewCostError(ValueError):
@@ -440,6 +459,65 @@ def _merge_conflict(
     return None
 
 
+def _required_check_counts(
+    required_check_names: list[str],
+    check_runs: list[GitHubCheckRun],
+) -> tuple[int, int, int, int]:
+    """Classify each policy-required check exactly once."""
+
+    check_runs_by_name: dict[str, list[GitHubCheckRun]] = {}
+
+    for check_run in check_runs:
+        check_runs_by_name.setdefault(
+            check_run.name,
+            [],
+        ).append(check_run)
+
+    passed = 0
+    failed = 0
+    pending = 0
+
+    for check_name in required_check_names:
+        matching_runs = check_runs_by_name.get(
+            check_name,
+            [],
+        )
+
+        if not matching_runs:
+            pending += 1
+            continue
+
+        if any(
+            check_run.status == GitHubCheckRunStatus.COMPLETED
+            and check_run.conclusion in _FAILED_REQUIRED_CHECK_CONCLUSIONS
+            for check_run in matching_runs
+        ):
+            failed += 1
+            continue
+
+        if any(
+            check_run.status != GitHubCheckRunStatus.COMPLETED
+            or check_run.conclusion is None
+            for check_run in matching_runs
+        ):
+            pending += 1
+            continue
+
+        if all(
+            check_run.conclusion in _PASSED_REQUIRED_CHECK_CONCLUSIONS
+            for check_run in matching_runs
+        ):
+            passed += 1
+            continue
+
+        raise GitHubReviewCostError(
+            "Required check has an unsupported normalized state."
+        )
+
+    total = len(required_check_names)
+    return total, passed, failed, pending
+
+
 def _historical_context(
     related_work: GitHubRelatedWorkResult,
 ) -> ReviewCostHistoricalContext:
@@ -523,7 +601,21 @@ def _assessment_input(
         url=pull_request.html_url,
     )
 
-    # The current policy schema does not define required check names.
+    required_check_names = (
+        assessment.repository_policy.pull_requests.required_checks
+        if policy_present
+        else []
+    )
+    (
+        required_checks_total,
+        required_checks_passed,
+        required_checks_failed,
+        required_checks_pending,
+    ) = _required_check_counts(
+        required_check_names,
+        snapshot.check_runs,
+    )
+
     return ReviewCostAssessmentInput(
         repository=knowledge_repository,
         pull_request=reference,
@@ -538,10 +630,10 @@ def _assessment_input(
         protected_changed_paths=protected_paths,
         draft=pull_request.draft,
         merge_conflict=_merge_conflict(assessment),
-        required_checks_total=0,
-        required_checks_passed=0,
-        required_checks_failed=0,
-        required_checks_pending=0,
+        required_checks_total=required_checks_total,
+        required_checks_passed=required_checks_passed,
+        required_checks_failed=required_checks_failed,
+        required_checks_pending=required_checks_pending,
         approval_count=snapshot.human_approval_count,
         changes_requested_count=snapshot.human_changes_requested_count,
         historical_context=_historical_context(related_work),

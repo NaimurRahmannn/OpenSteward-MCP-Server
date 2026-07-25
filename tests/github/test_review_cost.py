@@ -9,6 +9,9 @@ from pydantic import ValidationError
 
 from opensteward.github import (
     GitHubApprovalCountSource,
+    GitHubCheckRun,
+    GitHubCheckRunConclusion,
+    GitHubCheckRunStatus,
     GitHubChecksState,
     GitHubChecksSummary,
     GitHubContributionInputOptions,
@@ -74,7 +77,57 @@ ASSESSED_AT = datetime(2026, 6, 1, 10, 0, tzinfo=UTC)
 RELATED_AT = datetime(2026, 5, 31, 10, 0, tzinfo=UTC)
 
 
-def checks() -> GitHubChecksSummary:
+def checks(
+    check_runs: list[GitHubCheckRun] | None = None,
+) -> GitHubChecksSummary:
+    if check_runs is not None:
+        pending_count = sum(
+            check_run.status != GitHubCheckRunStatus.COMPLETED
+            or check_run.conclusion is None
+            for check_run in check_runs
+        )
+        success_count = sum(
+            check_run.conclusion == GitHubCheckRunConclusion.SUCCESS
+            for check_run in check_runs
+        )
+        failure_count = sum(
+            check_run.status == GitHubCheckRunStatus.COMPLETED
+            and check_run.conclusion
+            in {
+                GitHubCheckRunConclusion.ACTION_REQUIRED,
+                GitHubCheckRunConclusion.CANCELLED,
+                GitHubCheckRunConclusion.FAILURE,
+                GitHubCheckRunConclusion.STALE,
+                GitHubCheckRunConclusion.TIMED_OUT,
+            }
+            for check_run in check_runs
+        )
+        neutral_count = sum(
+            check_run.conclusion == GitHubCheckRunConclusion.NEUTRAL
+            for check_run in check_runs
+        )
+        skipped_count = sum(
+            check_run.conclusion == GitHubCheckRunConclusion.SKIPPED
+            for check_run in check_runs
+        )
+        state = GitHubChecksState.SUCCESS
+        if failure_count:
+            state = GitHubChecksState.FAILURE
+        elif pending_count:
+            state = GitHubChecksState.PENDING
+        elif not check_runs:
+            state = GitHubChecksState.NONE
+
+        return GitHubChecksSummary(
+            state=state,
+            total_count=len(check_runs),
+            pending_count=pending_count,
+            success_count=success_count,
+            failure_count=failure_count,
+            neutral_count=neutral_count,
+            skipped_count=skipped_count,
+        )
+
     return GitHubChecksSummary(
         state=GitHubChecksState.SUCCESS,
         total_count=1,
@@ -86,14 +139,44 @@ def checks() -> GitHubChecksSummary:
     )
 
 
+def check_run(
+    *,
+    check_id: int,
+    name: str,
+    status: GitHubCheckRunStatus = GitHubCheckRunStatus.COMPLETED,
+    conclusion: GitHubCheckRunConclusion | None = (
+        GitHubCheckRunConclusion.SUCCESS
+    ),
+) -> GitHubCheckRun:
+    return GitHubCheckRun(
+        id=check_id,
+        name=name,
+        head_sha=HEAD_SHA,
+        status=status,
+        conclusion=conclusion,
+    )
+
+
 def assessment_result(
     *,
     mergeable: bool | None = False,
     mergeable_state: str | None = "dirty",
     policy_present: bool = True,
+    required_checks: list[str] | None = None,
+    check_runs: list[GitHubCheckRun] | None = None,
 ) -> GitHubPullRequestAssessmentResult:
     """Build a complete typed assessment exposing source evidence."""
 
+    selected_check_runs = (
+        list(check_runs)
+        if check_runs is not None
+        else []
+    )
+    selected_checks = (
+        checks(selected_check_runs)
+        if check_runs is not None
+        else checks()
+    )
     actor = GitHubPullRequestActor(
         id=1,
         login="author",
@@ -165,10 +248,17 @@ def assessment_result(
         files=files,
         reviews=[approval],
         effective_reviews=[approval],
-        check_runs=[],
-        checks=checks(),
+        check_runs=selected_check_runs,
+        checks=selected_checks,
     )
     policy = RepositoryPolicy(
+        pull_requests={
+            "required_checks": (
+                list(required_checks)
+                if required_checks is not None
+                else []
+            ),
+        },
         protected_paths=[
             ProtectedPathRule(
                 pattern="src/security/**",
@@ -202,7 +292,7 @@ def assessment_result(
         human_approval_count=1,
         head_commit_human_approval_count=1,
         human_changes_requested_count=0,
-        checks=checks(),
+        checks=selected_checks,
     )
     source = (
         PolicySource.GITHUB_REPOSITORY
@@ -247,7 +337,7 @@ def assessment_result(
         linked_issue_evidence=[],
         approval_source=GitHubApprovalCountSource.HEAD_COMMIT,
         issue_linkage_scope=GitHubIssueLinkageScope.BODY_CLOSING_KEYWORDS_ONLY,
-        checks_state=GitHubChecksState.SUCCESS,
+        checks_state=selected_checks.state,
         files_complete=True,
         warnings=[],
     )
@@ -553,6 +643,149 @@ async def test_service_derives_all_evidence_in_exact_sequence_without_mutation()
     assert selected_request.model_dump() == before[0]
     assert assessment.model_dump() == before[1]
     assert related.model_dump() == before[2]
+
+
+@pytest.mark.asyncio
+async def test_policy_required_checks_are_classified_once_by_final_state() -> None:
+    events: list[str] = []
+    assessment = assessment_result(
+        required_checks=[
+            "tests",
+            "lint",
+            "deploy",
+            "not-started",
+            "advisory",
+            "optional-job",
+        ],
+        check_runs=[
+            check_run(
+                check_id=1,
+                name="tests",
+            ),
+            check_run(
+                check_id=2,
+                name="lint",
+                conclusion=GitHubCheckRunConclusion.FAILURE,
+            ),
+            check_run(
+                check_id=3,
+                name="deploy",
+                status=GitHubCheckRunStatus.IN_PROGRESS,
+                conclusion=None,
+            ),
+            check_run(
+                check_id=4,
+                name="advisory",
+                conclusion=GitHubCheckRunConclusion.NEUTRAL,
+            ),
+            check_run(
+                check_id=5,
+                name="optional-job",
+                conclusion=GitHubCheckRunConclusion.SKIPPED,
+            ),
+            check_run(
+                check_id=6,
+                name="unrelated",
+                conclusion=GitHubCheckRunConclusion.FAILURE,
+            ),
+        ],
+    )
+    related = await related_result(assessment)
+    domain = RecordingReviewCostAssessor(events)
+
+    await GitHubReviewCostService(
+        pull_request_assessor=RecordingAssessor(
+            assessment,
+            events,
+        ),
+        related_work_finder=RecordingFinder(
+            related,
+            events,
+        ),
+        review_cost_assessor=domain,
+        clock=lambda: ASSESSED_AT,
+    ).assess(request())
+
+    domain_input = domain.calls[0][0]
+    assert domain_input.required_checks_total == 6
+    assert domain_input.required_checks_passed == 3
+    assert domain_input.required_checks_failed == 1
+    assert domain_input.required_checks_pending == 2
+
+
+@pytest.mark.asyncio
+async def test_duplicate_matching_runs_do_not_double_count_required_check() -> None:
+    events: list[str] = []
+    assessment = assessment_result(
+        required_checks=["tests"],
+        check_runs=[
+            check_run(
+                check_id=1,
+                name="tests",
+            ),
+            check_run(
+                check_id=2,
+                name="tests",
+                conclusion=GitHubCheckRunConclusion.TIMED_OUT,
+            ),
+        ],
+    )
+    related = await related_result(assessment)
+    domain = RecordingReviewCostAssessor(events)
+
+    await GitHubReviewCostService(
+        pull_request_assessor=RecordingAssessor(
+            assessment,
+            events,
+        ),
+        related_work_finder=RecordingFinder(
+            related,
+            events,
+        ),
+        review_cost_assessor=domain,
+        clock=lambda: ASSESSED_AT,
+    ).assess(request())
+
+    domain_input = domain.calls[0][0]
+    assert domain_input.required_checks_total == 1
+    assert domain_input.required_checks_passed == 0
+    assert domain_input.required_checks_failed == 1
+    assert domain_input.required_checks_pending == 0
+
+
+@pytest.mark.asyncio
+async def test_unconfigured_checks_are_not_treated_as_required() -> None:
+    events: list[str] = []
+    assessment = assessment_result(
+        check_runs=[
+            check_run(
+                check_id=1,
+                name="tests",
+                conclusion=GitHubCheckRunConclusion.FAILURE,
+            ),
+        ],
+    )
+    related = await related_result(assessment)
+    domain = RecordingReviewCostAssessor(events)
+
+    await GitHubReviewCostService(
+        pull_request_assessor=RecordingAssessor(
+            assessment,
+            events,
+        ),
+        related_work_finder=RecordingFinder(
+            related,
+            events,
+        ),
+        review_cost_assessor=domain,
+        clock=lambda: ASSESSED_AT,
+    ).assess(request())
+
+    domain_input = domain.calls[0][0]
+    assert domain_input.required_checks_total == 0
+    assert domain_input.required_checks_passed == 0
+    assert domain_input.required_checks_failed == 0
+    assert domain_input.required_checks_pending == 0
 
 
 @pytest.mark.asyncio

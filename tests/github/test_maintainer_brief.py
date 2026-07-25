@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from opensteward.github import (
+    GitHubCheckRunConclusion,
     GitHubContributionInputOptions,
     GitHubHistoricalKnowledgeSnapshotOptions,
     GitHubMaintainerBriefError,
@@ -14,9 +15,11 @@ from opensteward.github import (
     GitHubMaintainerBriefService,
     GitHubRepositoryRef,
     GitHubReviewCostRequest,
+    GitHubReviewCostService,
 )
 from opensteward.knowledge import KnowledgeRelatedWorkOptions
 from opensteward.maintainer_brief import (
+    MaintainerAttentionReasonKind,
     MaintainerAttentionRecommendation,
     MaintainerBrief,
     MaintainerBriefInput,
@@ -28,7 +31,18 @@ from opensteward.review_intelligence import ReviewCostAssessmentOptions
 from tests.github.test_review_cost import (
     ASSESSED_AT,
     REPOSITORY,
+    RecordingFinder,
+    RecordingReviewCostAssessor,
+    assessment_result,
+    check_run,
     completed_review_cost_result,
+    related_result,
+)
+from tests.github.test_review_cost import (
+    RecordingAssessor as RecordingPullRequestAssessor,
+)
+from tests.github.test_review_cost import (
+    request as review_cost_request,
 )
 
 
@@ -183,6 +197,65 @@ async def test_service_reuses_phase_five_evidence_once_without_mutation() -> Non
     assert (
         phase_five.pull_request_assessment.repository_policy.model_dump()
         == policy_before
+    )
+
+
+@pytest.mark.asyncio
+async def test_failed_required_check_reaches_maintainer_attention_routing() -> None:
+    events: list[str] = []
+    assessment = assessment_result(
+        mergeable=True,
+        mergeable_state="clean",
+        required_checks=["tests"],
+        check_runs=[
+            check_run(
+                check_id=1,
+                name="tests",
+                conclusion=GitHubCheckRunConclusion.FAILURE,
+            )
+        ],
+    )
+    related = await related_result(assessment)
+    review_cost = await GitHubReviewCostService(
+        pull_request_assessor=RecordingPullRequestAssessor(
+            assessment,
+            events,
+        ),
+        related_work_finder=RecordingFinder(
+            related,
+            events,
+        ),
+        review_cost_assessor=RecordingReviewCostAssessor(
+            events
+        ),
+        clock=lambda: ASSESSED_AT,
+    ).assess(review_cost_request())
+    builder = RecordingBuilder()
+
+    result = await GitHubMaintainerBriefService(
+        review_cost_assessor=RecordingAssessor(
+            review_cost
+        ),
+        brief_builder=builder,
+    ).build(request())
+
+    readiness = builder.calls[0].readiness
+    assert readiness.required_checks_total == 1
+    assert readiness.required_checks_passed == 0
+    assert readiness.required_checks_failed == 1
+    assert readiness.required_checks_pending == 0
+    assert result.recommendation == (
+        MaintainerAttentionRecommendation.AUTHOR_ACTION_FIRST
+    )
+    assert any(
+        reason.kind
+        == MaintainerAttentionReasonKind.FAILED_REQUIRED_CHECKS
+        and reason.blocking
+        for reason in result.brief.attention.reasons
+    )
+    assert (
+        "Fix failed required checks before maintainer review."
+        in result.brief.recommended_actions
     )
 
 
