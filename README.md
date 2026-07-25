@@ -903,7 +903,8 @@ live integration path. Never put production keys or tokens into fixtures.
 - There is no persistence, background indexing, queue, or cross-process token
   cache. Evidence is collected on demand.
 - There are no GitHub write operations by design.
-- Docker and hosted deployment instructions are not currently provided.
+- Managed hosted, cloud-specific, and Kubernetes deployment guidance is not
+  currently provided.
 - CI and release workflows are not currently present.
 
 ## Roadmap
