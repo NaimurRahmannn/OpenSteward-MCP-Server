@@ -1,6 +1,10 @@
 from mcp.server.fastmcp import FastMCP
 
 from opensteward import __version__
+from opensteward.mcp.auth import (
+    ConfiguredBearerTokenVerifier,
+    mcp_auth_settings,
+)
 from opensteward.mcp.github_capabilities import (
     assess_pull_request,
     assess_review_cost,
@@ -15,16 +19,21 @@ from opensteward.models import ReviewCostFactors, ReviewCostResult
 from opensteward.review_cost import calculate_review_cost
 from opensteward.settings import get_settings
 
-mcp=FastMCP(
+mcp = FastMCP(
     name="OpenSteward",
     stateless_http=True,
-    json_response=True
+    json_response=True,
+    auth=mcp_auth_settings(),
+    token_verifier=ConfiguredBearerTokenVerifier(),
 )
 
+
 @mcp.tool()
-def system_status()->dict[str,str]:
+def system_status() -> dict[str, str]:
     """Return the current OpenSteward system status."""
+
     settings = get_settings()
+
     return {
         "name": settings.app_name,
         "version": __version__,
@@ -32,7 +41,8 @@ def system_status()->dict[str,str]:
         "stage": "version-1-foundation",
         "mode": "read-only",
     }
-    
+
+
 @mcp.tool()
 def estimate_review_cost(
     factors: ReviewCostFactors,
@@ -50,6 +60,8 @@ def estimate_review_cost(
     """
 
     return calculate_review_cost(factors)
+
+
 mcp.tool()(evaluate_repository_policy)
 mcp.tool()(assess_pull_request)
 mcp.tool()(find_related_work)

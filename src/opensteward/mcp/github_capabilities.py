@@ -23,6 +23,7 @@ from opensteward.github import (
     LiveGitHubReviewCostRunner,
 )
 from opensteward.knowledge import KnowledgeRelatedWorkOptions
+from opensteward.mcp.auth import require_installation_access
 from opensteward.policy import (
     DEFAULT_POLICY_FILENAME,
     ContributionCategory,
@@ -66,6 +67,8 @@ async def assess_pull_request(
     request changes, close, merge, or modify the pull request.
     """
 
+    require_installation_access(installation_id)
+
     request = GitHubPullRequestAssessmentRequest(
         installation_id=installation_id,
         repository=repository,
@@ -103,6 +106,8 @@ async def find_related_work(
     It does not comment, label, edit, close, merge, or otherwise modify
     repository content.
     """
+
+    require_installation_access(installation_id)
 
     request = GitHubRelatedWorkRequest(
         installation_id=installation_id,
@@ -146,6 +151,8 @@ async def assess_review_cost(
     merge, or modify repository content. It does not evaluate contributor skill
     or trustworthiness.
     """
+
+    require_installation_access(installation_id)
 
     request = GitHubReviewCostRequest(
         installation_id=installation_id,
@@ -205,6 +212,8 @@ async def get_maintainer_brief(
     modify repository content. It does not decide whether the pull request should
     merge, evaluate contributor skill or trustworthiness, or use an LLM.
     """
+
+    require_installation_access(installation_id)
 
     request = GitHubMaintainerBriefRequest(
         installation_id=installation_id,
