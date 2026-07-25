@@ -11,6 +11,7 @@ from opensteward.knowledge import (
     KnowledgeItemState,
     KnowledgeItemType,
     KnowledgeLexicalQuery,
+    KnowledgeRelatedWorkOptions,
     KnowledgeRelatedWorkResult,
     KnowledgeRelatedWorkService,
     KnowledgeRepositoryRef,
@@ -109,6 +110,9 @@ def related_work(
             query,
             items,
             as_of=ASSESSED_AT,
+            options=KnowledgeRelatedWorkOptions(
+                minimum_relevance_score=1,
+            ),
         )
     )
     if warnings:

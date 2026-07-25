@@ -133,6 +133,7 @@ def make_request(**updates: Any) -> GitHubRelatedWorkRequest:
         "query": GitHubRelatedWorkQuery(
             text="parser",
             affected_paths=["src/parser/service.py"],
+            labels=["architecture"],
         ),
     }
     payload.update(updates)

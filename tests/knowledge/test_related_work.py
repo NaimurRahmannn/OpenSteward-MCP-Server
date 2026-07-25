@@ -241,6 +241,7 @@ async def deterministic_result(
     *items: KnowledgeItem,
     query: KnowledgeLexicalQuery | None = None,
     max_results: int = 20,
+    minimum_relevance_score: int = 19,
 ) -> KnowledgeRelatedWorkResult:
     """Run the service without semantic scoring."""
 
@@ -248,7 +249,10 @@ async def deterministic_result(
         query or make_query(),
         list(items),
         as_of=AS_OF,
-        options=KnowledgeRelatedWorkOptions(max_results=max_results),
+        options=KnowledgeRelatedWorkOptions(
+            max_results=max_results,
+            minimum_relevance_score=minimum_relevance_score,
+        ),
     )
 
 
@@ -256,6 +260,7 @@ async def hybrid_result(
     *items: KnowledgeItem,
     query: KnowledgeLexicalQuery | None = None,
     max_results: int = 20,
+    minimum_relevance_score: int = 19,
     scores: dict[str, int] | None = None,
 ) -> tuple[KnowledgeRelatedWorkResult, RecordingSemanticService]:
     """Run the service with complete semantic scoring."""
@@ -270,7 +275,10 @@ async def hybrid_result(
         query or make_query(),
         list(items),
         as_of=AS_OF,
-        options=KnowledgeRelatedWorkOptions(max_results=max_results),
+        options=KnowledgeRelatedWorkOptions(
+            max_results=max_results,
+            minimum_relevance_score=minimum_relevance_score,
+        ),
     )
     return result, semantic_service
 
@@ -311,6 +319,7 @@ def test_public_modes_defaults_and_option_bounds() -> None:
     ]
     options = KnowledgeRelatedWorkOptions()
     assert options.max_results == 20
+    assert options.minimum_relevance_score == 19
     assert options.semantic_scoring == KnowledgeSemanticScoringOptions()
     assert KnowledgeRelatedWorkOptions(max_results=1).max_results == 1
     assert (
@@ -322,6 +331,10 @@ def test_public_modes_defaults_and_option_bounds() -> None:
     for value in (0, MAX_KNOWLEDGE_RELATED_WORK_RESULTS + 1):
         with pytest.raises(ValidationError):
             KnowledgeRelatedWorkOptions(max_results=value)
+        with pytest.raises(ValidationError):
+            KnowledgeRelatedWorkOptions(
+                minimum_relevance_score=value
+            )
 
 
 def test_options_preserve_nested_semantic_options() -> None:
@@ -385,6 +398,9 @@ async def test_match_models_validate_shapes_scores_and_counts() -> None:
     assert deterministic_match.raw_score == (
         deterministic_match.hybrid_match.total_weighted_basis_points
     )
+    assert deterministic_match.relevance_score == (
+        deterministic_match.hybrid_match.relevance_score
+    )
     assert deterministic_match.lexical_evidence_count > 0
     assert deterministic_match.contribution_count == 5
 
@@ -393,6 +409,9 @@ async def test_match_models_validate_shapes_scores_and_counts() -> None:
     assert hybrid_match.score == hybrid_match.hybrid_match.score
     assert hybrid_match.raw_score == (
         hybrid_match.hybrid_match.total_weighted_basis_points
+    )
+    assert hybrid_match.relevance_score == (
+        hybrid_match.hybrid_match.relevance_score
     )
     assert hybrid_match.contribution_count == 6
 
@@ -405,6 +424,7 @@ async def test_match_models_validate_shapes_scores_and_counts() -> None:
     fallback_match = fallback.matches[0]
     assert fallback_match.score == fallback_match.lexical_match.score
     assert fallback_match.raw_score == fallback_match.lexical_match.raw_score
+    assert fallback_match.relevance_score == fallback_match.lexical_match.score
     assert fallback_match.contribution_count == 0
 
 
@@ -518,7 +538,10 @@ async def test_summary_is_concise_and_does_not_share_nested_lists() -> None:
         affected_paths=["src/parser.py"],
         components=["Runtime"],
     )
-    result = await deterministic_result(item)
+    result = await deterministic_result(
+        item,
+        minimum_relevance_score=1,
+    )
     summary = result.matches[0].item
     dumped = summary.model_dump()
 
@@ -670,7 +693,11 @@ async def test_deterministic_path_has_complete_explainable_ranking() -> None:
             affected_paths=["src/other.py"],
         ),
     ]
-    result = await deterministic_result(*items, max_results=1)
+    result = await deterministic_result(
+        *items,
+        max_results=1,
+        minimum_relevance_score=1,
+    )
     assert result.mode == KnowledgeRelatedWorkMode.DETERMINISTIC
     assert result.semantic_status is None
     assert result.semantic_provider is None
@@ -746,6 +773,7 @@ async def test_scored_semantics_produce_hybrid_provenance_and_order() -> None:
         first,
         second,
         max_results=1,
+        minimum_relevance_score=1,
         scores=scores,
     )
 
@@ -763,6 +791,36 @@ async def test_scored_semantics_produce_hybrid_provenance_and_order() -> None:
     assert result.matches[0].item_key == second.key
     assert result.matches[0].hybrid_match.semantic_similarity.score == 90
     assert result.matches[0].contribution_count == 6
+
+
+@pytest.mark.asyncio
+async def test_default_relevance_floor_excludes_weak_important_semantic_match() -> None:
+    item = make_item(
+        title="Unrelated historical decision",
+        body="No matching query concepts.",
+        summary="Different work.",
+        state=KnowledgeItemState.REJECTED,
+        significance=DecisionSignificance.CRITICAL,
+        labels=["unrelated"],
+        affected_paths=["docs/unrelated.md"],
+        components=["unrelated"],
+        updated_at=AS_OF - timedelta(days=10),
+    )
+    query = make_query(
+        text="absent",
+        affected_paths=[],
+        labels=[],
+    )
+    result, _ = await hybrid_result(
+        item,
+        query=query,
+        scores={item.key: 60},
+    )
+
+    assert result.semantic_performed is True
+    assert result.eligible_document_count == 1
+    assert result.candidate_count == 0
+    assert result.matches == []
 
 
 @pytest.mark.asyncio
@@ -1089,6 +1147,20 @@ async def test_result_validates_repository_counts_keys_ranks_and_modes() -> None
             {**base, "matches": wrong_ranks}
         )
 
+    with pytest.raises(
+        ValidationError,
+        match="minimum_relevance_score",
+    ):
+        KnowledgeRelatedWorkResult.model_validate(
+            {
+                **base,
+                "options": {
+                    **base["options"],
+                    "minimum_relevance_score": 100,
+                },
+            }
+        )
+
     mixed_modes = deepcopy(base["matches"])
     mixed_modes[0]["mode"] = KnowledgeRelatedWorkMode.HYBRID
     with pytest.raises(ValidationError):
@@ -1101,7 +1173,11 @@ async def test_result_validates_repository_counts_keys_ranks_and_modes() -> None
 async def test_result_validates_all_ranking_orders() -> None:
     first = make_item("001", significance=DecisionSignificance.CRITICAL)
     second = make_item("002", significance=DecisionSignificance.NONE)
-    deterministic = await deterministic_result(first, second)
+    deterministic = await deterministic_result(
+        first,
+        second,
+        minimum_relevance_score=1,
+    )
     deterministic_payload = result_payload(deterministic)
     reversed_deterministic = list(reversed(deterministic_payload["matches"]))
     for rank, match in enumerate(reversed_deterministic, start=1):
@@ -1114,6 +1190,7 @@ async def test_result_validates_all_ranking_orders() -> None:
     hybrid, _ = await hybrid_result(
         first,
         second,
+        minimum_relevance_score=1,
         scores={first.key: 90, second.key: 10},
     )
     hybrid_payload = result_payload(hybrid)

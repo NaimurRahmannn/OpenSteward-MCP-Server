@@ -27,6 +27,7 @@ from opensteward.knowledge import (
     KnowledgeItemState,
     KnowledgeItemType,
     KnowledgeLexicalQuery,
+    KnowledgeRelatedWorkOptions,
     KnowledgeRelatedWorkService,
     KnowledgeSourceKind,
 )
@@ -88,6 +89,9 @@ async def github_related_work_result() -> GitHubRelatedWorkResult:
         query,
         [item],
         as_of=collected_at,
+        options=KnowledgeRelatedWorkOptions(
+            minimum_relevance_score=1,
+        ),
     )
     snapshot = GitHubRelatedWorkSnapshotSummary(
         repository=repository,

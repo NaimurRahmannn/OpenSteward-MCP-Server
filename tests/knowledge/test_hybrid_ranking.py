@@ -367,6 +367,7 @@ def test_ranking_options_defaults_and_bounds() -> None:
 
     assert options.max_results == 20
     assert options.minimum_score == 1
+    assert options.minimum_relevance_score == 1
 
     for value in (0, MAX_KNOWLEDGE_HYBRID_RESULTS + 1):
         with pytest.raises(ValidationError):
@@ -374,6 +375,10 @@ def test_ranking_options_defaults_and_bounds() -> None:
     for value in (0, MAX_KNOWLEDGE_HYBRID_SCORE + 1):
         with pytest.raises(ValidationError):
             KnowledgeHybridRankingOptions(minimum_score=value)
+        with pytest.raises(ValidationError):
+            KnowledgeHybridRankingOptions(
+                minimum_relevance_score=value
+            )
 
 
 @pytest.mark.parametrize("score", [0, 100])
@@ -1015,6 +1020,38 @@ def test_semantic_only_candidate_and_zero_relevance_exclusion() -> None:
     semantic = contribution(match, KnowledgeHybridSignal.SEMANTIC)
     assert semantic.signal_score == 80
     assert semantic.explanation == EXPLANATIONS[KnowledgeHybridSignal.SEMANTIC]
+
+
+def test_relevance_threshold_excludes_historically_boosted_weak_semantics() -> None:
+    weak_item = make_item(
+        title="unrelated",
+        state=KnowledgeItemState.REJECTED,
+        significance=DecisionSignificance.CRITICAL,
+    )
+    query = make_query(text="absent")
+    semantic_scores = [make_similarity(weak_item, 60)]
+
+    unthresholded = rank(
+        query,
+        [weak_item],
+        semantic_scores,
+    )
+    weak_match = unthresholded.matches[0]
+
+    assert weak_match.relevance_score == 18
+    assert weak_match.score == 33
+
+    thresholded = rank(
+        query,
+        [weak_item],
+        semantic_scores,
+        options=KnowledgeHybridRankingOptions(
+            minimum_relevance_score=20,
+        ),
+    )
+
+    assert thresholded.candidate_count == 0
+    assert thresholded.matches == []
 
 
 @pytest.mark.parametrize(
@@ -1758,6 +1795,10 @@ def test_result_json_serializes_provenance_scores_counts_enums_and_utc() -> None
         result.matches[0].total_weighted_basis_points
     )
     assert match["score"] == result.matches[0].score
+    assert match["relevance_weighted_basis_points"] == (
+        result.matches[0].relevance_weighted_basis_points
+    )
+    assert match["relevance_score"] == result.matches[0].relevance_score
     assert match["core_lexical_raw_score"] == 5
     assert match["core_lexical_score"] == 5
 

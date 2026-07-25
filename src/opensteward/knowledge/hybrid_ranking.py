@@ -75,6 +75,14 @@ class KnowledgeHybridSignal(StrEnum):
     RECENCY = "recency"
 
 
+_RELEVANCE_SIGNALS = {
+    KnowledgeHybridSignal.LEXICAL,
+    KnowledgeHybridSignal.SEMANTIC,
+    KnowledgeHybridSignal.AFFECTED_PATH,
+    KnowledgeHybridSignal.LABEL,
+}
+
+
 _DETERMINISTIC_SIGNAL_WEIGHTS = {
     KnowledgeHybridSignal.LEXICAL: KNOWLEDGE_DETERMINISTIC_LEXICAL_WEIGHT,
     KnowledgeHybridSignal.AFFECTED_PATH: KNOWLEDGE_DETERMINISTIC_PATH_WEIGHT,
@@ -121,6 +129,11 @@ class KnowledgeHybridRankingOptions(StrictKnowledgeModel):
         le=MAX_KNOWLEDGE_HYBRID_RESULTS,
     )
     minimum_score: int = Field(
+        default=1,
+        ge=1,
+        le=MAX_KNOWLEDGE_HYBRID_SCORE,
+    )
+    minimum_relevance_score: int = Field(
         default=1,
         ge=1,
         le=MAX_KNOWLEDGE_HYBRID_SCORE,
@@ -250,6 +263,24 @@ class KnowledgeHybridRankedMatch(StrictKnowledgeModel):
         """Return the nearest whole hybrid score using half-up rounding."""
 
         return (self.total_weighted_basis_points + 50) // 100
+
+    @computed_field
+    @property
+    def relevance_weighted_basis_points(self) -> int:
+        """Return query-relevance points without significance or recency boosts."""
+
+        return sum(
+            contribution.weighted_basis_points
+            for contribution in self.contributions
+            if contribution.signal in _RELEVANCE_SIGNALS
+        )
+
+    @computed_field
+    @property
+    def relevance_score(self) -> int:
+        """Return the nearest whole query-relevance score."""
+
+        return (self.relevance_weighted_basis_points + 50) // 100
 
     @computed_field
     @property
@@ -719,7 +750,11 @@ def rank_knowledge_hybrid_corpus(
             semantic_similarity=semantic_similarity,
             contributions=contributions,
         )
-        if match.score >= effective_options.minimum_score:
+        if (
+            match.score >= effective_options.minimum_score
+            and match.relevance_score
+            >= effective_options.minimum_relevance_score
+        ):
             matches.append(match)
 
     matches.sort(key=_ranking_key)

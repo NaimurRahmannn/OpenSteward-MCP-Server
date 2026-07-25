@@ -66,6 +66,11 @@ class KnowledgeRelatedWorkOptions(StrictKnowledgeModel):
         ge=1,
         le=MAX_KNOWLEDGE_RELATED_WORK_RESULTS,
     )
+    minimum_relevance_score: int = Field(
+        default=19,
+        ge=1,
+        le=100,
+    )
     semantic_scoring: KnowledgeSemanticScoringOptions = Field(
         default_factory=KnowledgeSemanticScoringOptions
     )
@@ -249,6 +254,17 @@ class KnowledgeRelatedWorkMatch(StrictKnowledgeModel):
 
     @computed_field
     @property
+    def relevance_score(self) -> int:
+        """Return query relevance without historical importance boosts."""
+
+        if self.mode == KnowledgeRelatedWorkMode.LEXICAL_FALLBACK:
+            assert self.lexical_match is not None
+            return self.lexical_match.score
+        assert self.hybrid_match is not None
+        return self.hybrid_match.relevance_score
+
+    @computed_field
+    @property
     def lexical_evidence_count(self) -> int:
         """Return the number of retained lexical evidence records."""
 
@@ -338,6 +354,14 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError("Candidate count must be at least the returned count.")
         if len(self.matches) > self.options.max_results:
             raise ValueError("Returned matches must not exceed options.max_results.")
+        if any(
+            match.relevance_score
+            < self.options.minimum_relevance_score
+            for match in self.matches
+        ):
+            raise ValueError(
+                "Returned matches must satisfy options.minimum_relevance_score."
+            )
 
         item_keys = [match.item_key for match in self.matches]
         if len(item_keys) != len(set(item_keys)):
@@ -614,8 +638,16 @@ class KnowledgeRelatedWorkService:
             ),
         )
         if lexical_result.truncated:
+            qualifying_lexical_matches = [
+                match
+                for match in lexical_result.matches
+                if match.score
+                >= effective_options.minimum_relevance_score
+            ]
             matches = _build_lexical_matches(
-                lexical_result.matches[:effective_options.max_results],
+                qualifying_lexical_matches[
+                    :effective_options.max_results
+                ],
                 items_by_key,
             )
             return KnowledgeRelatedWorkResult(
@@ -668,6 +700,9 @@ class KnowledgeRelatedWorkService:
             options=KnowledgeHybridRankingOptions(
                 max_results=effective_options.max_results,
                 minimum_score=1,
+                minimum_relevance_score=(
+                    effective_options.minimum_relevance_score
+                ),
             ),
         )
         mode = (
