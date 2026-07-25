@@ -897,6 +897,4 @@ No timelines are implied.
 
 ## License
 
-This repository does not currently include a license file. Until the project
-owner adds one, do not assume permission to copy, modify, or redistribute the
-code beyond rights provided by applicable law.
+OpenSteward is available under the [MIT License](LICENSE).
