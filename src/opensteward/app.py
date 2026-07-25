@@ -4,11 +4,16 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response, status
 from pydantic import BaseModel
 
 from opensteward import __version__
 from opensteward.mcp.server import mcp
+from opensteward.readiness import (
+    ReadinessChecks,
+    ReadinessService,
+    ReadinessStatus,
+)
 from opensteward.settings import get_settings
 
 
@@ -20,18 +25,13 @@ class HealthResponse(BaseModel):
     version: str
 
 
-class ReadinessChecks(BaseModel):
-    """Individual application readiness checks."""
-
-    mcp: Literal["ready"]
-
-
 class ReadinessResponse(BaseModel):
     """Response returned by the readiness endpoint."""
 
-    status: Literal["ready"]
+    status: ReadinessStatus
     environment: str
     checks: ReadinessChecks
+    issues: list[str]
 
 
 # Calling streamable_http_app creates the MCP HTTP application
@@ -60,6 +60,9 @@ def create_app() -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
+    application.state.readiness_service = ReadinessService(
+        settings=settings
+    )
 
     @application.get(
         "/health",
@@ -78,17 +81,32 @@ def create_app() -> FastAPI:
     @application.get(
         "/ready",
         response_model=ReadinessResponse,
+        responses={
+            status.HTTP_503_SERVICE_UNAVAILABLE: {
+                "model": ReadinessResponse,
+            },
+        },
         tags=["Operations"],
     )
-    async def ready() -> ReadinessResponse:
+    async def ready(
+        response: Response,
+    ) -> ReadinessResponse:
         """Report whether the application is ready to receive requests."""
 
+        assessment = await (
+            application.state.readiness_service.assess()
+        )
+
+        if assessment.status != ReadinessStatus.READY:
+            response.status_code = (
+                status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+
         return ReadinessResponse(
-            status="ready",
+            status=assessment.status,
             environment=settings.environment,
-            checks=ReadinessChecks(
-                mcp="ready",
-            ),
+            checks=assessment.checks,
+            issues=assessment.issues,
         )
 
     # The MCP sub-application already defines its own /mcp route,
