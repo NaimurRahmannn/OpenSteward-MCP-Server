@@ -1,8 +1,12 @@
 """Authenticated, read-only GitHub REST API client."""
 
+import asyncio
+import random
 import re
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from math import ceil
 from typing import Any, Generic, Protocol, TypeVar
 from urllib.parse import urlsplit
 
@@ -20,8 +24,11 @@ from opensteward.github.installation_tokens import (
 from opensteward.github.models import StrictGitHubModel
 from opensteward.github.settings import GitHubAppSettings
 
-
 DEFAULT_GITHUB_ACCEPT = "application/vnd.github+json"
+
+MAX_TRANSIENT_RETRIES = 3
+INITIAL_RETRY_DELAY_SECONDS = 0.5
+MAX_RETRY_DELAY_SECONDS = 30.0
 
 _LINK_PATTERN = re.compile(
     r'<([^>]+)>\s*;\s*rel="([^"]+)"'
@@ -165,6 +172,38 @@ def _parse_non_negative_integer(
     return parsed
 
 
+def _parse_retry_after_seconds(
+    value: str | None,
+    *,
+    now: datetime | None = None,
+) -> int | None:
+    """Parse Retry-After delta seconds or an HTTP date."""
+
+    delta_seconds = _parse_non_negative_integer(value)
+
+    if delta_seconds is not None:
+        return delta_seconds
+
+    if value is None:
+        return None
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+
+    current_time = now or datetime.now(UTC)
+    remaining_seconds = (
+        retry_at.astimezone(UTC)
+        - current_time.astimezone(UTC)
+    ).total_seconds()
+
+    return max(0, ceil(remaining_seconds))
+
+
 def _parse_rate_limit_metadata(
     response: httpx.Response,
 ) -> GitHubRateLimitMetadata | None:
@@ -255,6 +294,92 @@ def _parse_pagination_links(
         return None
 
     return pagination
+
+
+def _is_rate_limited_response(
+    response: httpx.Response,
+) -> bool:
+    """Return whether a 403 or 429 response represents rate limiting."""
+
+    if response.status_code not in {403, 429}:
+        return False
+
+    rate_limit = _parse_rate_limit_metadata(
+        response
+    )
+
+    remaining = (
+        rate_limit.remaining
+        if rate_limit is not None
+        else None
+    )
+
+    retry_after_seconds = (
+        _parse_retry_after_seconds(
+            response.headers.get("retry-after")
+        )
+    )
+
+    message, _ = _extract_error_details(response)
+
+    return (
+        response.status_code == 429
+        or remaining == 0
+        or retry_after_seconds is not None
+        or "rate limit" in message.casefold()
+    )
+
+
+def _is_transient_response(
+    response: httpx.Response,
+) -> bool:
+    """Return whether a response is safe to retry."""
+
+    return (
+        response.status_code in {
+            500,
+            502,
+            503,
+            504,
+        }
+        or _is_rate_limited_response(response)
+    )
+
+
+def _retry_delay_seconds(
+    retry_number: int,
+    *,
+    response: httpx.Response | None = None,
+) -> float:
+    """Calculate a bounded retry delay.
+
+    Retry-After takes precedence when GitHub supplies it. Otherwise,
+    full jitter is applied to exponential backoff.
+    """
+
+    if response is not None:
+        retry_after_seconds = (
+            _parse_retry_after_seconds(
+                response.headers.get("retry-after")
+            )
+        )
+
+        if retry_after_seconds is not None:
+            return min(
+                float(retry_after_seconds),
+                MAX_RETRY_DELAY_SECONDS,
+            )
+
+    exponential_ceiling = min(
+        INITIAL_RETRY_DELAY_SECONDS
+        * (2 ** (retry_number - 1)),
+        MAX_RETRY_DELAY_SECONDS,
+    )
+
+    return random.uniform(
+        0.0,
+        exponential_ceiling,
+    )
 
 
 def _extract_error_details(
@@ -474,24 +599,13 @@ class GitHubRestClient:
         )
 
         retry_after_seconds = (
-            _parse_non_negative_integer(
+            _parse_retry_after_seconds(
                 response.headers.get("retry-after")
             )
         )
 
-        remaining = (
-            rate_limit.remaining
-            if rate_limit is not None
-            else None
-        )
-
-        rate_limited = (
-            response.status_code in {403, 429}
-            and (
-                remaining == 0
-                or retry_after_seconds is not None
-                or "rate limit" in safe_message.casefold()
-            )
+        rate_limited = _is_rate_limited_response(
+            response
         )
 
         error_message = (
@@ -526,7 +640,8 @@ class GitHubRestClient:
         """Send an authenticated GET request and validate its JSON body.
 
         A 401 response causes one installation-token refresh and one
-        retry. Other error statuses are not retried automatically.
+        retry. Transport failures, temporary server failures, and
+        rate-limit responses use bounded retries with backoff.
         """
 
         normalized_accept = accept.strip()
@@ -543,31 +658,69 @@ class GitHubRestClient:
             scope=self._token_scope,
         )
 
-        response = await self._send_get(
-            url=url,
-            params=params,
-            token=token,
-            accept=normalized_accept,
-        )
+        transient_retries = 0
+        token_refreshed = False
 
-        if response.status_code == 401:
-            self._token_provider.invalidate(
-                self._installation_id,
-                scope=self._token_scope,
-            )
+        while True:
+            try:
+                response = await self._send_get(
+                    url=url,
+                    params=params,
+                    token=token,
+                    accept=normalized_accept,
+                )
+            except GitHubRestTransportError:
+                if (
+                    transient_retries
+                    >= MAX_TRANSIENT_RETRIES
+                ):
+                    raise
 
-            token = await self._token_provider.get_token(
-                self._installation_id,
-                scope=self._token_scope,
-                force_refresh=True,
-            )
+                transient_retries += 1
 
-            response = await self._send_get(
-                url=url,
-                params=params,
-                token=token,
-                accept=normalized_accept,
-            )
+                await asyncio.sleep(
+                    _retry_delay_seconds(
+                        transient_retries
+                    )
+                )
+
+                continue
+
+            if (
+                response.status_code == 401
+                and not token_refreshed
+            ):
+                self._token_provider.invalidate(
+                    self._installation_id,
+                    scope=self._token_scope,
+                )
+
+                token = await self._token_provider.get_token(
+                    self._installation_id,
+                    scope=self._token_scope,
+                    force_refresh=True,
+                )
+
+                token_refreshed = True
+                continue
+
+            if (
+                _is_transient_response(response)
+                and transient_retries
+                < MAX_TRANSIENT_RETRIES
+            ):
+                transient_retries += 1
+
+                await asyncio.sleep(
+                    _retry_delay_seconds(
+                        transient_retries,
+                        response=response,
+                    )
+                )
+
+                continue
+
+            break
 
         if not response.is_success:
             self._raise_response_error(

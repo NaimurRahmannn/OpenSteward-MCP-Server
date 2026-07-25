@@ -1,6 +1,7 @@
 """Tests for the authenticated GitHub REST client."""
 
 from datetime import UTC, datetime, timedelta
+from email.utils import format_datetime
 from typing import Any
 
 import httpx
@@ -20,7 +21,7 @@ from opensteward.github import (
     GitHubRestResponseError,
     GitHubRestTransportError,
 )
-
+from opensteward.github import rest_client as rest_client_module
 
 FIXED_NOW = datetime(
     2026,
@@ -427,12 +428,27 @@ async def test_client_does_not_retry_more_than_once() -> None:
 
 
 @pytest.mark.anyio
-async def test_client_reports_structured_rate_limit_error() -> None:
+async def test_client_reports_structured_rate_limit_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reset_epoch = int(
         (
             FIXED_NOW
             + timedelta(minutes=15)
         ).timestamp()
+    )
+
+    delays: list[float] = []
+
+    async def record_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
     )
 
     def handler(
@@ -493,6 +509,156 @@ async def test_client_reports_structured_rate_limit_error() -> None:
     assert error.rate_limit.reset_at == (
         FIXED_NOW
         + timedelta(minutes=15)
+    )
+    assert delays == [30.0, 30.0, 30.0]
+
+
+@pytest.mark.anyio
+async def test_client_retries_temporary_server_failures_with_jitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+
+    async def record_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
+    monkeypatch.setattr(
+        rest_client_module.random,
+        "uniform",
+        lambda lower, upper: upper,
+    )
+
+    def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+
+        if request_count < 3:
+            return httpx.Response(
+                status_code=503,
+                json={
+                    "message": "Service unavailable",
+                },
+            )
+
+        return httpx.Response(
+            status_code=200,
+            json={
+                "id": 1001,
+                "full_name": "acme/framework",
+                "private": True,
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+    ) as http_client:
+        client = GitHubRestClient(
+            settings=create_settings(),
+            token_provider=FakeTokenProvider(),
+            client=http_client,
+            installation_id=987654,
+        )
+
+        response = await client.get_json(
+            "/repos/acme/framework",
+            response_type=RepositoryPayload,
+        )
+
+    assert response.status_code == 200
+    assert request_count == 3
+    assert delays == [0.5, 1.0]
+
+
+@pytest.mark.anyio
+async def test_client_retries_rate_limit_403(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+
+    async def record_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
+    def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+
+        if request_count == 1:
+            return httpx.Response(
+                status_code=403,
+                headers={
+                    "Retry-After": "2",
+                    "X-RateLimit-Remaining": "0",
+                },
+                json={
+                    "message": "API rate limit exceeded",
+                },
+            )
+
+        return httpx.Response(
+            status_code=200,
+            json={},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+    ) as http_client:
+        client = GitHubRestClient(
+            settings=create_settings(),
+            token_provider=FakeTokenProvider(),
+            client=http_client,
+            installation_id=987654,
+        )
+
+        response = await client.get_json(
+            "/repos/acme/framework",
+        )
+
+    assert response.status_code == 200
+    assert request_count == 2
+    assert delays == [2.0]
+
+
+def test_retry_after_supports_http_date() -> None:
+    retry_at = FIXED_NOW + timedelta(
+        seconds=12,
+        microseconds=1,
+    )
+
+    assert (
+        rest_client_module._parse_retry_after_seconds(
+            format_datetime(
+                retry_at,
+                usegmt=True,
+            ),
+            now=FIXED_NOW,
+        )
+        == 12
     )
 
 
@@ -653,10 +819,29 @@ async def test_client_reports_response_validation_failure() -> None:
 
 
 @pytest.mark.anyio
-async def test_client_reports_transport_failure() -> None:
+async def test_client_reports_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+
+    async def record_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
     def handler(
         request: httpx.Request,
     ) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+
         raise httpx.ConnectError(
             "Connection failed",
             request=request,
@@ -681,6 +866,65 @@ async def test_client_reports_transport_failure() -> None:
             await client.get_json(
                 "/repos/acme/framework"
             )
+
+    assert request_count == 4
+    assert len(delays) == 3
+
+
+@pytest.mark.anyio
+async def test_client_recovers_from_transport_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request_count = 0
+    delays: list[float] = []
+
+    async def record_sleep(
+        delay: float,
+    ) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(
+        rest_client_module.asyncio,
+        "sleep",
+        record_sleep,
+    )
+
+    def handler(
+        request: httpx.Request,
+    ) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+
+        if request_count == 1:
+            raise httpx.ConnectError(
+                "Connection failed",
+                request=request,
+            )
+
+        return httpx.Response(
+            status_code=200,
+            json={},
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        transport=transport,
+    ) as http_client:
+        client = GitHubRestClient(
+            settings=create_settings(),
+            token_provider=FakeTokenProvider(),
+            client=http_client,
+            installation_id=987654,
+        )
+
+        response = await client.get_json(
+            "/repos/acme/framework"
+        )
+
+    assert response.status_code == 200
+    assert request_count == 2
+    assert len(delays) == 1
 
 
 @pytest.mark.parametrize(
