@@ -15,6 +15,9 @@ from opensteward.github import (
     GitHubRepositoryRef,
     LiveGitHubRelatedWorkRunner,
 )
+from opensteward.knowledge.semantic_settings import (
+    SemanticSettings,
+)
 
 CONFIGURATION_MESSAGE = (
     "GitHub App authentication is not configured. "
@@ -337,3 +340,77 @@ async def test_runtime_stays_open_after_service_failure_until_closed(
     await runner.aclose()
 
     assert FakeAsyncClient.instances[0].closed is True
+
+
+def test_enabled_semantics_builds_and_injects_configured_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured = SemanticSettings(
+        _env_file=None,
+        semantic_enabled=True,
+        semantic_max_documents=42,
+    )
+    client = object()
+    scorer = object()
+    semantic_service = object()
+    finder = object()
+    calls: dict[str, Any] = {}
+
+    def build_scorer(
+        settings: SemanticSettings,
+        *,
+        client: object,
+    ) -> object:
+        calls["scorer"] = {
+            "settings": settings,
+            "client": client,
+        }
+        return scorer
+
+    def build_semantic_service(
+        **kwargs: Any,
+    ) -> object:
+        calls["semantic_service"] = kwargs
+        return semantic_service
+
+    def build_finder(
+        **kwargs: Any,
+    ) -> object:
+        calls["finder"] = kwargs
+        return finder
+
+    monkeypatch.setattr(
+        runtime_module,
+        "build_semantic_scorer",
+        build_scorer,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "KnowledgeSemanticScoringService",
+        build_semantic_service,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "KnowledgeRelatedWorkService",
+        build_finder,
+    )
+
+    result = runtime_module._build_related_work_finder(
+        configured,
+        client=client,  # type: ignore[arg-type]
+    )
+
+    assert result is finder
+    assert calls["scorer"] == {
+        "settings": configured,
+        "client": client,
+    }
+    assert calls["semantic_service"] == {
+        "scorer": scorer,
+        "maximum_documents": 42,
+    }
+    assert calls["finder"] == {
+        "semantic_scoring_service": (
+            semantic_service
+        )
+    }

@@ -30,6 +30,10 @@ class KnowledgeSemanticScoringError(ValueError):
     """Raised when local semantic-scoring orchestration cannot proceed safely."""
 
 
+class KnowledgeSemanticScorerUnavailableError(RuntimeError):
+    """Raised when an injected semantic provider cannot score safely."""
+
+
 class KnowledgeSemanticScoringStatus(StrEnum):
     """Outcomes of provider-neutral semantic-scoring orchestration."""
 
@@ -492,8 +496,22 @@ class KnowledgeSemanticScoringService:
         self,
         *,
         scorer: KnowledgeSemanticScorer,
+        maximum_documents: int | None = None,
     ) -> None:
+        if (
+            maximum_documents is not None
+            and not (
+                1
+                <= maximum_documents
+                <= MAX_KNOWLEDGE_SEMANTIC_DOCUMENTS
+            )
+        ):
+            raise ValueError(
+                "maximum_documents must be within semantic safety bounds."
+            )
+
         self._scorer = scorer
+        self._maximum_documents = maximum_documents
 
     async def score(
         self,
@@ -516,6 +534,15 @@ class KnowledgeSemanticScoringService:
                 query=query,
                 status=KnowledgeSemanticScoringStatus.NO_ELIGIBLE_DOCUMENTS,
                 eligible_document_count=0,
+            )
+        if (
+            self._maximum_documents is not None
+            and len(eligible_documents)
+            > self._maximum_documents
+        ):
+            raise KnowledgeSemanticScorerUnavailableError(
+                "Eligible document count exceeds the configured local "
+                "semantic limit."
             )
         if len(eligible_documents) > effective_options.max_documents:
             raise KnowledgeSemanticScoringError(

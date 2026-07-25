@@ -210,7 +210,9 @@ async def get_maintainer_brief(
     Authentication uses a GitHub App installation. The tool is read-only: it
     does not comment, label, approve, reject, request changes, close, merge, or
     modify repository content. It does not decide whether the pull request should
-    merge, evaluate contributor skill or trustworthiness, or use an LLM.
+    merge or evaluate contributor skill or trustworthiness. Optional semantic
+    models can improve related-work ranking, but routing and recommendations
+    remain deterministic.
     """
 
     require_installation_access(installation_id)

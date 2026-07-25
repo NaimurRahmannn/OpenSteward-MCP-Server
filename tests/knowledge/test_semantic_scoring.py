@@ -22,6 +22,7 @@ from opensteward.knowledge import (
     KnowledgeRepositoryRef,
     KnowledgeSemanticScorerResponse,
     KnowledgeSemanticScorerScore,
+    KnowledgeSemanticScorerUnavailableError,
     KnowledgeSemanticScoringDocument,
     KnowledgeSemanticScoringError,
     KnowledgeSemanticScoringOptions,
@@ -841,6 +842,29 @@ async def test_document_count_above_limit_raises_before_scorer() -> None:
             corpus,
             options=KnowledgeSemanticScoringOptions(max_documents=1),
         )
+    assert scorer.requests == []
+
+
+@pytest.mark.asyncio
+async def test_configured_local_document_limit_uses_unavailable_fallback_signal() -> None:
+    scorer = RecordingScorer()
+    corpus = make_corpus(
+        make_item(external_id="1"),
+        make_item(external_id="2"),
+    )
+
+    with pytest.raises(
+        KnowledgeSemanticScorerUnavailableError,
+        match="configured local semantic limit",
+    ):
+        await KnowledgeSemanticScoringService(
+            scorer=scorer,
+            maximum_documents=1,
+        ).score(
+            make_query(text="semantic"),
+            corpus,
+        )
+
     assert scorer.requests == []
 
 

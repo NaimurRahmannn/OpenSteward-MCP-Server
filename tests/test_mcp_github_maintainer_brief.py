@@ -148,7 +148,9 @@ def test_docstring_states_boundaries_and_read_only_behavior() -> None:
         "does not comment, label, approve, reject, request changes, close, merge",
         "does not decide whether the pull request should",
         "contributor skill or trustworthiness",
-        "use an LLM",
+        "Optional semantic",
+        "routing and recommendations",
+        "remain deterministic",
     ):
         assert text in docstring
     assert "httpx" not in capabilities.get_maintainer_brief.__code__.co_names

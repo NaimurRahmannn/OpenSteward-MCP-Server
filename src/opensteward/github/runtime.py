@@ -56,7 +56,17 @@ from opensteward.github.settings import (
     GitHubConfigurationError,
     get_github_settings,
 )
-from opensteward.knowledge import KnowledgeRelatedWorkService
+from opensteward.knowledge import (
+    KnowledgeRelatedWorkService,
+    KnowledgeSemanticScoringService,
+)
+from opensteward.knowledge.semantic_providers import (
+    build_semantic_scorer,
+)
+from opensteward.knowledge.semantic_settings import (
+    SemanticSettings,
+    get_semantic_settings,
+)
 from opensteward.maintainer_brief import MaintainerBriefService
 from opensteward.review_intelligence import ReviewCostAssessmentService
 
@@ -64,6 +74,46 @@ SettingsFactory = Callable[
     [],
     GitHubAppSettings,
 ]
+SemanticSettingsFactory = Callable[
+    [],
+    SemanticSettings,
+]
+
+
+def _default_disabled_semantic_settings() -> SemanticSettings:
+    """Return defaults without reading a developer's local .env file."""
+
+    return SemanticSettings(
+        _env_file=None,
+        semantic_enabled=False,
+        groq_enabled=False,
+    )
+
+
+def _build_related_work_finder(
+    settings: SemanticSettings,
+    *,
+    client: httpx.AsyncClient,
+) -> KnowledgeRelatedWorkService:
+    """Build deterministic or configured hybrid related-work search."""
+
+    if not settings.semantic_enabled:
+        return KnowledgeRelatedWorkService()
+
+    scorer = build_semantic_scorer(
+        settings,
+        client=client,
+    )
+    semantic_service = KnowledgeSemanticScoringService(
+        scorer=scorer,
+        maximum_documents=(
+            settings.semantic_max_documents
+        ),
+    )
+
+    return KnowledgeRelatedWorkService(
+        semantic_scoring_service=semantic_service
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,8 +192,20 @@ class _LiveGitHubRunner:
         self,
         *,
         settings_factory: SettingsFactory = get_github_settings,
+        semantic_settings_factory: (
+            SemanticSettingsFactory | None
+        ) = None,
     ) -> None:
         self._settings_factory = settings_factory
+        self._semantic_settings_factory = (
+            semantic_settings_factory
+            if semantic_settings_factory is not None
+            else (
+                get_semantic_settings
+                if settings_factory is get_github_settings
+                else _default_disabled_semantic_settings
+            )
+        )
         self._github_runtime = (
             _shared_github_runtime
             if settings_factory is get_github_settings
@@ -288,7 +350,10 @@ class LiveGitHubRelatedWorkRunner(_LiveGitHubRunner):
                 path_enricher=path_enricher,
                 adr_collector=adr_collector,
             )
-            related_work_finder = KnowledgeRelatedWorkService()
+            related_work_finder = _build_related_work_finder(
+                self._semantic_settings_factory(),
+                client=http_client,
+            )
             related_work_service = GitHubRelatedWorkService(
                 snapshot_collector=snapshot_service,
                 related_work_finder=related_work_finder,
@@ -358,7 +423,10 @@ class LiveGitHubReviewCostRunner(_LiveGitHubRunner):
                 path_enricher=path_enricher,
                 adr_collector=adr_collector,
             )
-            related_work_finder = KnowledgeRelatedWorkService()
+            related_work_finder = _build_related_work_finder(
+                self._semantic_settings_factory(),
+                client=http_client,
+            )
             related_work_service = GitHubRelatedWorkService(
                 snapshot_collector=snapshot_service,
                 related_work_finder=related_work_finder,
@@ -435,7 +503,10 @@ class LiveGitHubMaintainerBriefRunner(_LiveGitHubRunner):
                 path_enricher=path_enricher,
                 adr_collector=adr_collector,
             )
-            related_work_finder = KnowledgeRelatedWorkService()
+            related_work_finder = _build_related_work_finder(
+                self._semantic_settings_factory(),
+                client=http_client,
+            )
             related_work_service = GitHubRelatedWorkService(
                 snapshot_collector=snapshot_service,
                 related_work_finder=related_work_finder,

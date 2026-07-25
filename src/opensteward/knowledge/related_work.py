@@ -33,6 +33,7 @@ from opensteward.knowledge.models import (
     StrictKnowledgeModel,
 )
 from opensteward.knowledge.semantic_scoring import (
+    KnowledgeSemanticScorerUnavailableError,
     KnowledgeSemanticScoringOptions,
     KnowledgeSemanticScoringResult,
     KnowledgeSemanticScoringStatus,
@@ -43,6 +44,9 @@ MAX_KNOWLEDGE_RELATED_WORK_RESULTS = 100
 _RELATED_WORK_LEXICAL_FALLBACK_WARNING = (
     "Lexical candidate retrieval reached its safety limit; semantic and hybrid "
     "ranking were skipped to avoid incomplete score fusion."
+)
+_RELATED_WORK_SEMANTIC_FALLBACK_WARNING = (
+    "Semantic scoring was unavailable; deterministic related-work ranking was used."
 )
 
 
@@ -419,8 +423,13 @@ class KnowledgeRelatedWorkResult(StrictKnowledgeModel):
             raise ValueError(
                 "Deterministic related work must not contain scored semantic provenance."
             )
-        if self.warnings:
-            raise ValueError("Deterministic related work must not contain warnings.")
+        if self.warnings not in (
+            [],
+            [_RELATED_WORK_SEMANTIC_FALLBACK_WARNING],
+        ):
+            raise ValueError(
+                "Deterministic related work contains unsupported warnings."
+            )
 
     def _validate_hybrid(self) -> None:
         if self.semantic_status != KnowledgeSemanticScoringStatus.SCORED:
@@ -628,20 +637,27 @@ class KnowledgeRelatedWorkService:
 
         semantic_result: KnowledgeSemanticScoringResult | None = None
         semantic_scores = None
+        warnings: list[str] = []
         if self._semantic_scoring_service is not None:
-            semantic_result = await self._semantic_scoring_service.score(
-                query,
-                corpus,
-                options=effective_options.semantic_scoring,
-            )
-            _validate_semantic_result(
-                semantic_result,
-                query=query,
-                repository=query.repository,
-                eligible_document_count=lexical_result.eligible_document_count,
-            )
-            if semantic_result.status == KnowledgeSemanticScoringStatus.SCORED:
-                semantic_scores = semantic_result.similarities
+            try:
+                semantic_result = await self._semantic_scoring_service.score(
+                    query,
+                    corpus,
+                    options=effective_options.semantic_scoring,
+                )
+            except KnowledgeSemanticScorerUnavailableError:
+                warnings.append(
+                    _RELATED_WORK_SEMANTIC_FALLBACK_WARNING
+                )
+            else:
+                _validate_semantic_result(
+                    semantic_result,
+                    query=query,
+                    repository=query.repository,
+                    eligible_document_count=lexical_result.eligible_document_count,
+                )
+                if semantic_result.status == KnowledgeSemanticScoringStatus.SCORED:
+                    semantic_scores = semantic_result.similarities
 
         hybrid_result = rank_knowledge_hybrid_corpus(
             query,
@@ -698,5 +714,5 @@ class KnowledgeRelatedWorkService:
             ),
             semantic_scored_document_count=semantic_scored_document_count,
             matches=matches,
-            warnings=[],
+            warnings=warnings,
         )

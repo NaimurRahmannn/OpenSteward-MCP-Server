@@ -28,6 +28,7 @@ from opensteward.knowledge import (
     KnowledgeRelatedWorkResult,
     KnowledgeRelatedWorkService,
     KnowledgeRepositoryRef,
+    KnowledgeSemanticScorerUnavailableError,
     KnowledgeSemanticScoringOptions,
     KnowledgeSemanticScoringResult,
     KnowledgeSemanticScoringStatus,
@@ -61,6 +62,9 @@ NON_UTC_AS_OF = datetime(
 FALLBACK_WARNING = (
     "Lexical candidate retrieval reached its safety limit; semantic and hybrid "
     "ranking were skipped to avoid incomplete score fusion."
+)
+SEMANTIC_FALLBACK_WARNING = (
+    "Semantic scoring was unavailable; deterministic related-work ranking was used."
 )
 
 
@@ -1022,6 +1026,33 @@ async def test_semantic_errors_propagate_without_retry_or_fallback() -> None:
         ).find(make_query(), [make_item()], as_of=AS_OF)
     assert validation_raised.value is captured_validation_error
     assert len(validation_service.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_unavailable_semantic_provider_uses_deterministic_fallback() -> None:
+    semantic_service = RecordingSemanticService(
+        KnowledgeSemanticScoringStatus.SCORED,
+        error=KnowledgeSemanticScorerUnavailableError(
+            "local model unavailable"
+        ),
+    )
+
+    result = await KnowledgeRelatedWorkService(
+        semantic_scoring_service=semantic_service
+    ).find(
+        make_query(),
+        [make_item()],
+        as_of=AS_OF,
+    )
+
+    assert result.mode == (
+        KnowledgeRelatedWorkMode.DETERMINISTIC
+    )
+    assert result.semantic_status is None
+    assert result.warnings == [
+        SEMANTIC_FALLBACK_WARNING
+    ]
+    assert result.returned_count == 1
 
 
 @pytest.mark.asyncio
