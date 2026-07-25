@@ -29,6 +29,7 @@ deterministic. The default server does not require an LLM.
 - [GitHub App setup](#github-app-setup)
 - [Environment configuration](#environment-configuration)
 - [Starting the server](#starting-the-server)
+- [Docker deployment](#docker-deployment)
 - [Health and readiness](#health-and-readiness)
 - [Testing with MCP Inspector](#testing-with-mcp-inspector)
 - [Connecting an OpenAI Agents SDK agent](#connecting-an-openai-agents-sdk-agent)
@@ -511,6 +512,30 @@ Unix:
 The direct Uvicorn command uses the explicit flags shown; the installed
 `opensteward` command uses the `OPENSTEWARD_HOST`,
 `OPENSTEWARD_PORT`, and `OPENSTEWARD_LOG_LEVEL` settings.
+
+## Docker deployment
+
+For a production-oriented local container deployment, create `.env`, keep the
+GitHub App private key outside the repository, and set
+`OPENSTEWARD_GITHUB_PRIVATE_KEY_HOST_PATH` to its absolute host path. Then run:
+
+```bash
+docker build -t opensteward:local .
+docker compose up --build -d
+```
+
+Verify liveness and dependency readiness:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/ready
+```
+
+The Streamable HTTP endpoint is `http://127.0.0.1:8000/mcp`. The image runs as
+a non-root user; Compose mounts the private key read-only and uses a read-only
+root filesystem. See the complete Windows, Unix, security, lifecycle, and
+troubleshooting instructions in the
+[container deployment guide](docs/deployment.md).
 
 ## Health and readiness
 

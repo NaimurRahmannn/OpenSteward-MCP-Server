@@ -1,0 +1,69 @@
+# Source control and automation metadata
+.git
+.gitignore
+.gitattributes
+.github
+
+# Local Python environments and caches
+.venv
+venv
+env
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.tox
+.nox
+
+# Test, coverage, build, and package output
+tests
+.coverage
+.coverage.*
+htmlcov
+coverage.xml
+build
+dist
+**/*.egg-info/
+
+# Local documentation/example runtime output
+docs
+examples
+*.log
+logs
+
+# Environment files and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+secrets
+**/secrets/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+
+# Editors and operating-system files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Miscellaneous caches and temporary output
+.cache
+tmp
+temp
+*.tmp
