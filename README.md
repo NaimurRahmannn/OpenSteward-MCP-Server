@@ -32,6 +32,7 @@ deterministic. The default server does not require an LLM.
 - [Docker deployment](#docker-deployment)
 - [Health and readiness](#health-and-readiness)
 - [Testing with MCP Inspector](#testing-with-mcp-inspector)
+- [Connecting Google Antigravity](#connecting-google-antigravity)
 - [Connecting an OpenAI Agents SDK agent](#connecting-an-openai-agents-sdk-agent)
 - [Calling get_maintainer_brief](#calling-get_maintainer_brief)
 - [Repository policy](#repository-policy)
@@ -677,6 +678,46 @@ For the flagship tool:
 These are placeholders. The GitHub App must be installed on the repository,
 the caller token must be authorized for that installation ID, and the pull
 request must exist.
+
+## Connecting Google Antigravity
+
+OpenSteward can be used from Google Antigravity as a remote Streamable HTTP
+MCP server. Add a server entry to Antigravity's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "opensteward": {
+      "serverUrl": "http://127.0.0.1:8000/mcp",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_CALLER_TOKEN"
+      }
+    }
+  }
+}
+```
+
+Use the configured OpenSteward MCP caller token from
+`OPENSTEWARD_MCP_AUTHORIZED_CALLERS`. Do not use a GitHub token. The
+`Bearer ` prefix is required.
+
+After saving the configuration, reload Antigravity's MCP servers. The
+OpenSteward server should appear in **Manage MCP servers** with its tools
+enabled. You can smoke-test the connection by asking Antigravity to call
+`system_status`.
+
+![Antigravity running OpenSteward system_status](docs/Screenshot%202026-07-26%20210316.png)
+
+Once the connection is working, Antigravity can invoke OpenSteward's
+pull-request intelligence tools against repositories authorized for the
+configured GitHub App installation.
+
+![Antigravity summarizing pull-request assessments from OpenSteward](docs/Screenshot%202026-07-26%20211412.png)
+
+For a focused pull-request check, provide the pull request number and the
+GitHub App installation ID allowed for your MCP caller token.
+
+![Antigravity assessing a single pull request with OpenSteward](docs/Screenshot%202026-07-26%20211659.png)
 
 ## Connecting an OpenAI Agents SDK agent
 
